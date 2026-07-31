@@ -17,7 +17,7 @@ pub struct RpcSettings {
 
 pub fn get_settings() -> Result<Settings> {
     Config::builder()
-        .add_source(config::File::with_name("configuration.yaml"))
+        .add_source(config::File::with_name("settings.yaml"))
         .build()?
         .try_deserialize::<Settings>()
         .map_err(|e| anyhow!("{e}"))
