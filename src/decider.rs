@@ -9,7 +9,7 @@ pub trait Decider {
 pub struct RoundRobin<T> {
     items: Vec<T>,
     next: AtomicUsize,
-} 
+}
 
 impl<T> RoundRobin<T> {
     pub fn new(items: impl IntoIterator<Item = T>) -> Self {

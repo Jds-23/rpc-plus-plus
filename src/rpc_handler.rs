@@ -12,11 +12,13 @@ use crate::decider::RoundRobin;
 pub struct RpcHandler {
     http: reqwest::Client,
     url: String,
+    label: String,
 }
 
-pub type RoundRobinHandler=Arc<RoundRobin<RpcHandler>>;
+pub type RoundRobinHandler = Arc<RoundRobin<RpcHandler>>;
 
 pub struct RpcHandlerBuilder {
+    label: Option<String>,
     url: Option<String>,
     timeout_in_secs: u64,
 }
@@ -24,6 +26,7 @@ pub struct RpcHandlerBuilder {
 impl RpcHandlerBuilder {
     pub fn default() -> Self {
         RpcHandlerBuilder {
+            label: None,
             url: None,
             timeout_in_secs: 10,
         }
@@ -31,6 +34,11 @@ impl RpcHandlerBuilder {
 
     pub fn new() -> Self {
         RpcHandlerBuilder::default()
+    }
+
+    pub fn with_label(mut self, label: String) -> Self {
+        self.label = Some(label);
+        self
     }
 
     pub fn with_url(mut self, url_string: String) -> Self {
@@ -49,7 +57,8 @@ impl RpcHandlerBuilder {
                 .timeout(std::time::Duration::from_secs(self.timeout_in_secs))
                 .build()
                 .map_err(|e| anyhow!("client build failed: {}", e))?;
-            Ok(RpcHandler { http, url })
+            let label = self.label.unwrap_or_else(|| url.clone());
+            Ok(RpcHandler { http, url, label })
         } else {
             Err(anyhow!("url is not present"))
         }
