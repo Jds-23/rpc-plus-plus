@@ -1,14 +1,8 @@
 use std::sync::Arc;
 
-use axum::{
-    Router,
-    routing::{get, post},
-};
 use rpc_plus_plus::{
-    decider::RoundRobin,
-    route::{healthz::get_health, rpc::rpc_proxy},
-    rpc_handler::{RoundRobinHandler, RpcHandler, RpcHandlerBuilder},
-    settings, telemetry,
+    decider::RoundRobin, route, rpc_handler::RoundRobinHandler, settings, start_up::build_handlers,
+    telemetry,
 };
 
 #[tokio::main]
@@ -20,28 +14,9 @@ async fn main() {
         Err(e) => panic!("{e}"),
     };
 
-    let handlers: Vec<RpcHandler> = settings
-        .rpcs
-        .iter()
-        .filter_map(|item| {
-            match RpcHandlerBuilder::default()
-                .with_url(item.rpc_url.clone())
-                .build()
-            {
-                Ok(item) => Some(item),
-                Err(err) => {
-                    tracing::warn!(
-                        url = %&item.label,
-                        error = format!("{err:#}"),
-                        "skipping rpc backend"
-                    );
-                    None
-                }
-            }
-        })
-        .collect();
+    let handlers = build_handlers(settings.rpcs);
 
-    if handlers.len() < 1 {
+    if handlers.is_empty() {
         tracing::error!("zero handlers created");
         std::process::exit(1);
     }
@@ -50,14 +25,12 @@ async fn main() {
 
     let state: RoundRobinHandler = Arc::new(RoundRobin::new(handlers.into_iter()));
 
-    let app = Router::new()
-        .route("/healthz", get(get_health))
-        .route("/rpc", post(rpc_proxy))
-        .with_state(state);
+    let app = route::build_router(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:8080")
-        .await
-        .unwrap();
+    let listener =
+        tokio::net::TcpListener::bind(format!("127.0.0.1:{}", settings.application_port))
+            .await
+            .unwrap();
 
     axum::serve(listener, app).await.unwrap();
 }

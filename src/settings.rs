@@ -4,6 +4,7 @@ use config::Config;
 #[derive(serde::Deserialize)]
 pub struct Settings {
     pub rpcs: Vec<RpcSettings>,
+    pub application_port: u16,
     pub retry_count: Option<u64>,
     pub rpc_timeout: Option<u64>,
     pub retry_after: Option<u64>,
