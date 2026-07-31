@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use crate::{
-    rpc_handler::{RpcHandler, RpcHandlerBuilder},
+    decider::RoundRobin,
+    rpc_handler::{RoundRobinHandler, RpcHandler, RpcHandlerBuilder},
     settings::RpcSettings,
 };
 
@@ -22,4 +25,8 @@ pub fn build_handlers(rpcs: Vec<RpcSettings>) -> Vec<RpcHandler> {
             }
         })
         .collect()
+}
+
+pub fn build_state(rcp_handlers: Vec<RpcHandler>) -> RoundRobinHandler {
+    Arc::new(RoundRobin::new(rcp_handlers.into_iter()))
 }
