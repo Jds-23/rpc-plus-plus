@@ -28,5 +28,5 @@ pub fn build_handlers(rpcs: Vec<RpcSettings>) -> Vec<RpcHandler> {
 }
 
 pub fn build_state(rcp_handlers: Vec<RpcHandler>) -> RoundRobinHandler {
-    Arc::new(RoundRobin::new(rcp_handlers.into_iter()))
+    Arc::new(RoundRobin::new(rcp_handlers))
 }

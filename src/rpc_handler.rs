@@ -23,15 +23,17 @@ pub struct RpcHandlerBuilder {
     timeout_in_secs: u64,
 }
 
-impl RpcHandlerBuilder {
-    pub fn default() -> Self {
+impl Default for RpcHandlerBuilder {
+    fn default() -> Self {
         RpcHandlerBuilder {
             label: None,
             url: None,
             timeout_in_secs: 10,
         }
     }
+}
 
+impl RpcHandlerBuilder {
     pub fn new() -> Self {
         RpcHandlerBuilder::default()
     }
