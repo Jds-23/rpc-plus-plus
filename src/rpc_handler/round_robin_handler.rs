@@ -1,6 +1,6 @@
 use crate::{
     decider::{Decider, RoundRobin},
-    rpc_handler::{self, RpcHandler},
+    rpc_handler::RpcHandler,
 };
 use axum::{
     body::Bytes,

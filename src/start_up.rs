@@ -1,8 +1,6 @@
-use std::sync::Arc;
 
 use crate::{
-    decider::RoundRobin,
-    rpc_handler::{RpcHandler, RpcHandlerBuilder, round_robin_handler::RoundRobinHandler},
+    rpc_handler::{RpcHandler, RpcHandlerBuilder},
     settings::RpcSettings,
 };
 
