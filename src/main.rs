@@ -1,8 +1,6 @@
-use std::sync::Arc;
-
 use rpc_plus_plus::{
-    decider::RoundRobin, route, rpc_handler::RoundRobinHandler, settings, start_up::build_handlers,
-    telemetry,
+    route, rpc_handler::round_robin_handler::RoundRobinHandlerBuilder, settings,
+    start_up::build_handlers, telemetry,
 };
 
 #[tokio::main]
@@ -23,7 +21,13 @@ async fn main() {
 
     tracing::info!(count=%&handlers.len(),"starting proxy");
 
-    let state: RoundRobinHandler = Arc::new(RoundRobin::new(handlers.into_iter()));
+    // let state: RoundRobinHandler = Arc::new(RoundRobin::new(handlers.into_iter()));
+    let state = RoundRobinHandlerBuilder::default()
+        .with_max_retry_count(settings.retry_after.unwrap_or(handlers.len() as u64))
+        // .with_retry_after_in_secs(settings.retry_after.unwrap_or_else(||1))
+        .with_handlers(handlers)
+        .build()
+        .unwrap(); // can be better
 
     let app = route::build_router(state);
 

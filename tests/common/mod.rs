@@ -1,12 +1,16 @@
 pub mod mock_rpc_server;
 use rpc_plus_plus::{
-    route::build_router,
-    settings::RpcSettings,
-    start_up::{build_handlers, build_state},
+    route::build_router, rpc_handler::round_robin_handler::RoundRobinHandlerBuilder,
+    settings::RpcSettings, start_up::build_handlers,
 };
 
 pub async fn spawn_app(upstreams: Vec<RpcSettings>) -> String {
-    let app = build_router(build_state(build_handlers(upstreams)));
+    let state = RoundRobinHandlerBuilder::default()
+        .with_handlers(build_handlers(upstreams))
+        .build()
+        .expect("State build failed");
+
+    let app = build_router(state);
     // port 0 => OS picks a free port, tests can run in parallel
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

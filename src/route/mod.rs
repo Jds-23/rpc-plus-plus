@@ -5,7 +5,7 @@ use axum::{
 
 use crate::{
     route::{healthz::get_health, rpc::rpc_proxy},
-    rpc_handler::RoundRobinHandler,
+    rpc_handler::round_robin_handler::RoundRobinHandler,
 };
 
 pub mod healthz;

@@ -1,13 +1,10 @@
-use std::sync::Arc;
+pub mod round_robin_handler;
+
+use std::fmt::Debug;
 
 use anyhow::{Result, anyhow};
-use axum::{
-    body::Bytes,
-    response::{IntoResponse, Response},
-};
-use reqwest::{StatusCode, header};
-
-use crate::decider::RoundRobin;
+use axum::body::Bytes;
+use reqwest::header;
 
 pub struct RpcHandler {
     http: reqwest::Client,
@@ -15,8 +12,11 @@ pub struct RpcHandler {
     label: String,
 }
 
-pub type RoundRobinHandler = Arc<RoundRobin<RpcHandler>>;
-
+impl Debug for RpcHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label)
+    }
+}
 pub struct RpcHandlerBuilder {
     label: Option<String>,
     url: Option<String>,
@@ -68,36 +68,12 @@ impl RpcHandlerBuilder {
 }
 
 impl RpcHandler {
-    pub async fn proxy(&self, body: Bytes) -> Response {
-        let res = self
-            .http
+    pub async fn proxy(&self, body: &Bytes) -> Result<reqwest::Response, reqwest::Error> {
+        self.http
             .post(&self.url)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(body)
+            .body(body.to_owned())
             .send()
-            .await;
-
-        let res = match res {
-            Ok(r) => r,
-            Err(_) => return rpc_error(-32603, "upstream unreachable"),
-        };
-
-        let status = res.status();
-
-        match res.bytes().await {
-            Ok(b) => (status, [(header::CONTENT_TYPE, "application/json")], b).into_response(),
-            Err(_) => rpc_error(-32603, "upstream read failed"),
-        }
+            .await
     }
-}
-
-fn rpc_error(code: i64, msg: &str) -> Response {
-    let body =
-        format!(r#"{{"jsonrpc":"2.0","error":{{"code":{code},"message":"{msg}"}},"id":null}}"#);
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
 }
