@@ -1,10 +1,12 @@
-
 use crate::{
     rpc_handler::{RpcHandler, RpcHandlerBuilder},
     settings::RpcSettings,
 };
 
-pub fn build_handlers(rpcs: Vec<RpcSettings>) -> Vec<RpcHandler> {
+pub fn build_handlers<I>(rpcs: I) -> Vec<RpcHandler>
+where
+    I: IntoIterator<Item = RpcSettings>,
+{
     rpcs.into_iter()
         .filter_map(|item| {
             match RpcHandlerBuilder::default()

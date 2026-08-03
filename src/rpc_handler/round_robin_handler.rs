@@ -1,6 +1,8 @@
 use crate::{
     decider::{Decider, RoundRobin},
     rpc_handler::RpcHandler,
+    settings::RpcSettings,
+    start_up::build_handlers,
 };
 use axum::{
     body::Bytes,
@@ -28,6 +30,15 @@ pub struct RoundRobinHandlerBuilder {
 }
 
 impl RoundRobinHandlerBuilder {
+    pub fn with_rpc_setttings<I>(mut self, rpc_settings: I) -> Self
+    where
+        I: IntoIterator<Item = RpcSettings>,
+    {
+        let handlers = build_handlers(rpc_settings);
+        self.handlers.extend(handlers);
+        self
+    }
+
     pub fn with_handlers<I>(mut self, handlers: I) -> Self
     where
         I: IntoIterator<Item = RpcHandler>,
@@ -91,14 +102,14 @@ impl Inner {
         let mut last_failure = "upstream unreachable";
 
         for retry_count in 0..=self.max_retry_count {
+            if retry_count > 0 {
+                tokio::time::sleep(self.retry_after_in_secs).await;
+            }
+
             let handler = match self.handler.decide() {
                 Some(h) => h,
                 None => return rpc_error(-32603, "no upstream available"),
             };
-
-            if retry_count > 0 {
-                tokio::time::sleep(self.retry_after_in_secs).await;
-            }
 
             let res = match handler.proxy(&body).await {
                 Ok(r) => r,
@@ -109,6 +120,11 @@ impl Inner {
             };
 
             let status = res.status();
+
+            if !status.is_success() {
+                last_failure = "upstream read failed";
+                continue;
+            }
 
             match res.bytes().await {
                 Ok(b) => {
