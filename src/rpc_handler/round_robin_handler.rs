@@ -25,6 +25,8 @@ const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
 pub enum StateBuildError {
     #[error("no rpc handlers were provided")]
     NoHandlers,
+    #[error("max_attempt must be at least 1")]
+    ZeroMaxAttempt,
 }
 
 #[derive(Debug, Default)]
@@ -76,9 +78,14 @@ impl RoundRobinHandlerBuilder {
             return Err(StateBuildError::NoHandlers);
         }
 
+        let max_attempt = self.max_attempt.unwrap_or(DEFAULT_MAX_ATTEMPT);
+        if max_attempt == 0 {
+            return Err(StateBuildError::ZeroMaxAttempt);
+        }
+
         Ok(Arc::new(Inner::new(
             self.handlers,
-            self.max_attempt.unwrap_or(DEFAULT_MAX_ATTEMPT),
+            max_attempt,
             self.retry_after.unwrap_or(DEFAULT_RETRY_AFTER),
         )))
     }
@@ -91,7 +98,13 @@ pub struct Inner {
 }
 
 impl Inner {
-    pub fn new(rpc_handlers: Vec<RpcHandler>, max_attempt: u64, retry_after: Duration) -> Self {
+    /// Crate-private: the builder is the only supported constructor, and it is
+    /// what guarantees a non-empty rotation and `max_attempt >= 1`.
+    pub(crate) fn new(
+        rpc_handlers: Vec<RpcHandler>,
+        max_attempt: u64,
+        retry_after: Duration,
+    ) -> Self {
         Inner {
             handler: RoundRobin::new(rpc_handlers),
             max_attempt,
@@ -100,47 +113,47 @@ impl Inner {
     }
     pub async fn proxy(&self, body: Bytes) -> Response {
         let request_id = Uuid::new_v4();
-        let span = info_span!("proxy", 
-        %request_id,
-        body_bytes=body.len());
+        let span = info_span!("proxy", %request_id);
         self.proxy_inner(body).instrument(span).await
     }
 
     pub async fn proxy_inner(&self, body: Bytes) -> Response {
         let received_at = Instant::now();
-        info!("request_received");
+        info!(event = "request_received", body_bytes = body.len());
 
         if check_if_batch(&body) {
-            warn!("batch_rejected");
+            warn!(event = "batch_rejected", body_bytes = body.len());
             return StatusCode::BAD_REQUEST.into_response();
         }
 
         // "unreachable" unless a read is what actually failed last
         let mut last_failure = "upstream unreachable";
         let mut tried: Vec<&str> = Vec::with_capacity(self.max_attempt as usize);
+        let mut attempts = 0;
 
         for attempt in 1..=self.max_attempt {
             if attempt > 1 {
                 tokio::time::sleep(self.retry_after).await;
             }
 
+            // The builder rejects an empty rotation, so this is defensive only.
+            // Fall through to `retries_exhausted` rather than inventing an event
+            // name outside the logging schema.
             let Some(handler) = self.handler.decide() else {
-                error!(
-                    attempts = attempt - 1,
-                    duration_ms = elapsed_ms(received_at),
-                    "no upstream available"
-                );
-                return rpc_error(-32603, "no upstream available");
+                last_failure = "no upstream available";
+                attempts = attempt - 1;
+                break;
             };
             tried.push(&handler.label);
+            attempts = attempt;
 
             match Self::try_once(handler, &body, attempt).await {
                 Ok(response) => {
                     info!(
+                        event = "request_completed",
                         attempts = attempt,
                         upstream = %handler.label,
                         duration_ms = elapsed_ms(received_at),
-                        "request_completed"
                     );
                     return response;
                 }
@@ -149,11 +162,11 @@ impl Inner {
         }
 
         error!(
-            attempts = self.max_attempt,
+            event = "retries_exhausted",
+            attempts,
             tried = ?tried,
             duration_ms = elapsed_ms(received_at),
             error = last_failure,
-            "retries_exhausted"
         );
         rpc_error(-32603, last_failure)
     }
@@ -166,18 +179,18 @@ impl Inner {
         let attempt_start = Instant::now();
         let upstream = handler.label.as_str();
 
-        info!(attempt, upstream = %upstream, "attempt_started");
+        info!(event = "attempt_started", attempt, upstream = %upstream);
 
         let res = match handler.proxy(body).await {
             Ok(res) => res,
             Err(err) => {
                 // `without_url` strips the upstream URL, which embeds the API key.
                 warn!(
+                    event = "attempt_failed",
                     attempt,
                     upstream = %upstream,
                     duration_ms = elapsed_ms(attempt_start),
                     error = %err.without_url(),
-                    "attempt_failed"
                 );
                 return Err("upstream unreachable");
             }
@@ -189,12 +202,12 @@ impl Inner {
             Ok(body) => body,
             Err(err) => {
                 warn!(
+                    event = "attempt_failed",
                     attempt,
                     upstream = %upstream,
                     duration_ms = elapsed_ms(attempt_start),
                     http_status = http_status.as_u16(),
                     error = %err.without_url(),
-                    "attempt_failed"
                 );
                 return Err("upstream read failed");
             }
@@ -204,23 +217,23 @@ impl Inner {
 
         if http_status != StatusCode::OK {
             warn!(
+                event = "attempt_failed",
                 attempt,
                 upstream = %upstream,
                 duration_ms,
                 http_status = http_status.as_u16(),
                 error = "upstream returned error status",
-                "attempt_failed"
             );
             return Err("upstream returned error status");
         }
 
         info!(
+            event = "attempt_succeeded",
             attempt,
             upstream = %upstream,
             duration_ms,
             http_status = http_status.as_u16(),
             response_bytes = body.len(),
-            "attempt_succeeded"
         );
         Ok((
             http_status,
