@@ -1,10 +1,7 @@
 pub mod mock_rpc_server;
 use std::sync::Arc;
 
-use rpc_plus_plus::{
-    route::build_router,
-    rpc_handler::round_robin_handler::Inner,
-};
+use rpc_plus_plus::{route::build_router, rpc_handler::round_robin_handler::Inner};
 
 pub async fn spawn_app(state: Arc<Inner>) -> String {
     let app = build_router(state);

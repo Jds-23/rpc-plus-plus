@@ -23,7 +23,7 @@ async fn main() {
 
     // let state: RoundRobinHandler = Arc::new(RoundRobin::new(handlers.into_iter()));
     let state = RoundRobinHandlerBuilder::default()
-        .with_max_retry_count(settings.retry_after.unwrap_or(handlers.len() as u64))
+        .with_max_attempt(settings.retry_after.unwrap_or(handlers.len() as u64))
         // .with_retry_after_in_secs(settings.retry_after.unwrap_or_else(||1))
         .with_handlers(handlers)
         .build()

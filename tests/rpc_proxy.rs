@@ -127,7 +127,7 @@ async fn non_works_fine_retry_and_propagate_last_error() {
     ];
     let state = RoundRobinHandlerBuilder::default()
         .with_rpc_setttings(upstreams)
-        .with_max_retry_count(2)
+        .with_max_attempt(2)
         .with_retry_after_in_secs(0)
         .build()
         .expect("State build failed");
