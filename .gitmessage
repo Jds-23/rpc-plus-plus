@@ -1,0 +1,11 @@
+# <emoji> <type>(<scope>): <subject>   <= 72 chars, imperative, no period
+#
+# ✨ feat  🐛 fix  🧹 refactor  ⚡ perf  🏗️ test
+# 📝 docs  🎨 style  🔧 chore  📦 build  ⏪ revert
+# override: 🔒 security   🪵 logs/telemetry
+#
+# scopes: rpc route decider settings telemetry handler healthz startup tests docs deps
+#
+# body (optional, blank line first): why, not what
+#
+# full rules: docs/commit-style.md
