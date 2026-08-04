@@ -222,7 +222,12 @@ impl Inner {
             response_bytes = body.len(),
             "attempt_succeeded"
         );
-        Ok((http_status, [(header::CONTENT_TYPE, "application/json")], body).into_response())
+        Ok((
+            http_status,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        )
+            .into_response())
     }
 }
 
