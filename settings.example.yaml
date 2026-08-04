@@ -1,0 +1,15 @@
+# Copy to settings.yaml and fill in real upstreams. settings.yaml is gitignored
+# because provider URLs carry the API key in the path.
+
+application_port: 8080
+
+rpcs:
+  - label: alchemy
+    rpc_url: https://eth-mainnet.g.alchemy.com/v2/XXXX
+  - label: drpc
+    rpc_url: https://lb.drpc.org/ogrpc?network=ethereum&dkey=XXXX
+
+# Optional, shown with their defaults.
+max_attempt: 3
+rpc_timeout_in_secs: 3
+retry_after_in_secs: 1
