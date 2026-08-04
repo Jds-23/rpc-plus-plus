@@ -9,10 +9,11 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn healthz_returns_ok() {
-    let rcp_handlers = build_handlers(vec![RpcSettings {
+    let upstream = vec![RpcSettings {
         label: "fake".to_string(),
         rpc_url: "http://127.0.0.1:1/".to_string(),
-    }]);
+    }];
+    let rcp_handlers = build_handlers(upstream, 1);
 
     let state = RoundRobinHandlerBuilder::default()
         .with_handlers(rcp_handlers)

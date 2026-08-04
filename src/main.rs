@@ -9,10 +9,13 @@ async fn main() {
 
     let settings = match settings::get_settings() {
         Ok(settings) => settings,
-        Err(e) => panic!("{e}"),
+        Err(err) => {
+            tracing::error!(error = format!("{err:#}"), "failed to load settings");
+            std::process::exit(1);
+        }
     };
 
-    let handlers = build_handlers(settings.rpcs);
+    let handlers = build_handlers(settings.rpcs, settings.rpc_timeout_in_secs);
 
     if handlers.is_empty() {
         tracing::error!("zero handlers created");
@@ -21,13 +24,18 @@ async fn main() {
 
     tracing::info!(count=%&handlers.len(),"starting proxy");
 
-    // let state: RoundRobinHandler = Arc::new(RoundRobin::new(handlers.into_iter()));
-    let state = RoundRobinHandlerBuilder::default()
-        .with_max_attempt(settings.retry_after.unwrap_or(handlers.len() as u64))
-        // .with_retry_after_in_secs(settings.retry_after.unwrap_or_else(||1))
+    let state = match RoundRobinHandlerBuilder::default()
+        .with_max_attempt(settings.max_attempt)
+        .with_retry_after_in_secs(settings.retry_after_in_secs)
         .with_handlers(handlers)
         .build()
-        .unwrap(); // can be better
+    {
+        Ok(state) => state,
+        Err(err) => {
+            tracing::error!(error = %err, "failed to build proxy state");
+            std::process::exit(1);
+        }
+    };
 
     let app = route::build_router(state);
 

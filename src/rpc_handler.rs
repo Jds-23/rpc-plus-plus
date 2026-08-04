@@ -1,8 +1,8 @@
 pub mod round_robin_handler;
 
-use std::fmt::Debug;
+use std::{fmt::Debug, time::Duration};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result};
 use axum::body::Bytes;
 use reqwest::header;
 
@@ -17,20 +17,11 @@ impl Debug for RpcHandler {
         write!(f, "{}", self.label)
     }
 }
+#[derive(Default)]
 pub struct RpcHandlerBuilder {
     label: Option<String>,
     url: Option<String>,
-    timeout_in_secs: u64,
-}
-
-impl Default for RpcHandlerBuilder {
-    fn default() -> Self {
-        RpcHandlerBuilder {
-            label: None,
-            url: None,
-            timeout_in_secs: 10,
-        }
-    }
+    rpc_timeout_in_secs: Option<u64>,
 }
 
 impl RpcHandlerBuilder {
@@ -48,22 +39,24 @@ impl RpcHandlerBuilder {
         self
     }
 
-    pub fn with_timeout_in_secs(mut self, timeout_in_secs: u64) -> Self {
-        self.timeout_in_secs = timeout_in_secs;
+    pub fn with_rpc_timeout_in_secs(mut self, rpc_timeout_in_secs: u64) -> Self {
+        self.rpc_timeout_in_secs = Some(rpc_timeout_in_secs);
         self
     }
 
     pub fn build(self) -> Result<RpcHandler> {
-        if let Some(url) = self.url {
-            let http = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(self.timeout_in_secs))
-                .build()
-                .map_err(|e| anyhow!("client build failed: {}", e))?;
-            let label = self.label.unwrap_or_else(|| url.clone());
-            Ok(RpcHandler { http, url, label })
-        } else {
-            Err(anyhow!("url is not present"))
-        }
+        let url = self.url.context("url is not set")?;
+        let label = self.label.context("label is not set")?;
+        let rpc_timeout_in_secs = self
+            .rpc_timeout_in_secs
+            .context("rpc_timeout_in_secs is not set")?;
+
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(rpc_timeout_in_secs))
+            .build()
+            .context("failed to build HTTP client")?;
+
+        Ok(RpcHandler { http, url, label })
     }
 }
 

@@ -17,4 +17,6 @@ tower = "0.5.3"
 tracing = { version = "0.1.44", features = ["log"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "chrono"] }
 uuid = { version = "1.24.0", features = ["v4"] }
+
+[dev-dependencies]
 wiremock = "0.6.5"

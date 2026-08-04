@@ -16,7 +16,7 @@ async fn proxies_reponse_from_upstream() {
         rpc_url: mock_rpc_server.uri(),
     }];
     let state = RoundRobinHandlerBuilder::default()
-        .with_rpc_setttings(upstreams)
+        .with_rpc_settings(upstreams, 1)
         .build()
         .expect("State build failed");
     let addr = spawn_app(state).await;
@@ -47,7 +47,7 @@ async fn round_robin_distributes_evenly() {
         },
     ];
     let state = RoundRobinHandlerBuilder::default()
-        .with_rpc_setttings(upstreams)
+        .with_rpc_settings(upstreams, 1)
         .build()
         .expect("State build failed");
     let addr = spawn_app(state).await;
@@ -88,7 +88,7 @@ async fn works_fine_when_one_uptream_works() {
         },
     ];
     let state = RoundRobinHandlerBuilder::default()
-        .with_rpc_setttings(upstreams)
+        .with_rpc_settings(upstreams, 1)
         .with_retry_after_in_secs(0)
         .build()
         .expect("State build failed");
@@ -126,7 +126,7 @@ async fn non_works_fine_retry_and_propagate_last_error() {
         },
     ];
     let state = RoundRobinHandlerBuilder::default()
-        .with_rpc_setttings(upstreams)
+        .with_rpc_settings(upstreams, 1)
         .with_max_attempt(2)
         .with_retry_after_in_secs(0)
         .build()
@@ -146,6 +146,7 @@ async fn non_works_fine_retry_and_propagate_last_error() {
         assert_eq!(body["error"]["code"], -32603);
     }
 
-    assert_eq!(a.received_requests().await.unwrap().len(), 6);
-    assert_eq!(b.received_requests().await.unwrap().len(), 6);
+    // 4 requests x max_attempt 2 = 8 upstream calls, alternating across both upstreams
+    assert_eq!(a.received_requests().await.unwrap().len(), 4);
+    assert_eq!(b.received_requests().await.unwrap().len(), 4);
 }

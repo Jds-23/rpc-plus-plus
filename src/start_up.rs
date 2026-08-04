@@ -3,20 +3,22 @@ use crate::{
     settings::RpcSettings,
 };
 
-pub fn build_handlers<I>(rpcs: I) -> Vec<RpcHandler>
+pub fn build_handlers<I>(rpcs: I, rpc_timeout_in_secs: u64) -> Vec<RpcHandler>
 where
     I: IntoIterator<Item = RpcSettings>,
 {
     rpcs.into_iter()
         .filter_map(|item| {
             match RpcHandlerBuilder::default()
-                .with_url(item.rpc_url.clone())
+                .with_label(item.label.clone())
+                .with_rpc_timeout_in_secs(rpc_timeout_in_secs)
+                .with_url(item.rpc_url)
                 .build()
             {
                 Ok(item) => Some(item),
                 Err(err) => {
                     tracing::warn!(
-                        url = %&item.label,
+                        upstream = %&item.label,
                         error = format!("{err:#}"),
                         "skipping rpc backend"
                     );

@@ -13,12 +13,12 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::{Instrument, Span, error, field::Empty, info, info_span, warn};
+use tracing::{Instrument, error, info, info_span, warn};
 use uuid::Uuid;
 
 pub type RoundRobinHandler = Arc<Inner>;
 
-const DEFAULT_MAX_ATTEMPT: u64 = 2;
+const DEFAULT_MAX_ATTEMPT: u64 = 3;
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
@@ -35,11 +35,11 @@ pub struct RoundRobinHandlerBuilder {
 }
 
 impl RoundRobinHandlerBuilder {
-    pub fn with_rpc_setttings<I>(mut self, rpc_settings: I) -> Self
+    pub fn with_rpc_settings<I>(mut self, rpc_settings: I, rpc_timeout_in_secs: u64) -> Self
     where
         I: IntoIterator<Item = RpcSettings>,
     {
-        let handlers = build_handlers(rpc_settings);
+        let handlers = build_handlers(rpc_settings, rpc_timeout_in_secs);
         self.handlers.extend(handlers);
         self
     }
@@ -87,19 +87,15 @@ impl RoundRobinHandlerBuilder {
 pub struct Inner {
     handler: RoundRobin<RpcHandler>,
     max_attempt: u64,
-    retry_after_in_secs: Duration,
+    retry_after: Duration,
 }
 
 impl Inner {
-    pub fn new(
-        rpc_handlers: Vec<RpcHandler>,
-        max_attempt: u64,
-        retry_after_in_secs: Duration,
-    ) -> Self {
+    pub fn new(rpc_handlers: Vec<RpcHandler>, max_attempt: u64, retry_after: Duration) -> Self {
         Inner {
             handler: RoundRobin::new(rpc_handlers),
             max_attempt,
-            retry_after_in_secs,
+            retry_after,
         }
     }
     pub async fn proxy(&self, body: Bytes) -> Response {
@@ -111,99 +107,135 @@ impl Inner {
     }
 
     pub async fn proxy_inner(&self, body: Bytes) -> Response {
-        let span = Span::current();
+        let received_at = Instant::now();
         info!("request_received");
 
         if check_if_batch(&body) {
-            span.record("outcome", "rejected");
             warn!("batch_rejected");
             return StatusCode::BAD_REQUEST.into_response();
         }
 
         // "unreachable" unless a read is what actually failed last
         let mut last_failure = "upstream unreachable";
+        let mut tried: Vec<&str> = Vec::with_capacity(self.max_attempt as usize);
 
-        for attempt in 0..=self.max_attempt {
-            if attempt > 0 {
-                tokio::time::sleep(self.retry_after_in_secs).await;
+        for attempt in 1..=self.max_attempt {
+            if attempt > 1 {
+                tokio::time::sleep(self.retry_after).await;
             }
 
             let Some(handler) = self.handler.decide() else {
-                span.record("attempts", attempt);
-                span.record("outcome", "no_upstream");
-                error!("no upstream available");
+                error!(
+                    attempts = attempt - 1,
+                    duration_ms = elapsed_ms(received_at),
+                    "no upstream available"
+                );
                 return rpc_error(-32603, "no upstream available");
             };
+            tried.push(&handler.label);
 
             match Self::try_once(handler, &body, attempt).await {
                 Ok(response) => {
-                    span.record("attempts", attempt + 1);
-                    span.record("outcome", "success");
-                    info!("request completed");
+                    info!(
+                        attempts = attempt,
+                        upstream = %handler.label,
+                        duration_ms = elapsed_ms(received_at),
+                        "request_completed"
+                    );
                     return response;
                 }
                 Err(reason) => last_failure = reason,
             }
         }
 
-        span.record("attempts", self.max_attempt + 1);
-        span.record("outcome", "exhausted");
-        error!(error = last_failure, "retries_exhausted");
+        error!(
+            attempts = self.max_attempt,
+            tried = ?tried,
+            duration_ms = elapsed_ms(received_at),
+            error = last_failure,
+            "retries_exhausted"
+        );
         rpc_error(-32603, last_failure)
     }
 
-    #[tracing::instrument(
-        name = "attempt",
-        skip_all,
-        fields(attempt, upstream = %handler.label, duration_ms = Empty, http_status = Empty),
-    )]
     async fn try_once(
         handler: &RpcHandler,
         body: &Bytes,
         attempt: u64,
     ) -> Result<Response, &'static str> {
-        let span = Span::current();
         let attempt_start = Instant::now();
+        let upstream = handler.label.as_str();
+
+        info!(attempt, upstream = %upstream, "attempt_started");
+
+        let res = match handler.proxy(body).await {
+            Ok(res) => res,
+            Err(err) => {
+                // `without_url` strips the upstream URL, which embeds the API key.
+                warn!(
+                    attempt,
+                    upstream = %upstream,
+                    duration_ms = elapsed_ms(attempt_start),
+                    error = %err.without_url(),
+                    "attempt_failed"
+                );
+                return Err("upstream unreachable");
+            }
+        };
+
+        let http_status = res.status();
+
+        let body = match res.bytes().await {
+            Ok(body) => body,
+            Err(err) => {
+                warn!(
+                    attempt,
+                    upstream = %upstream,
+                    duration_ms = elapsed_ms(attempt_start),
+                    http_status = http_status.as_u16(),
+                    error = %err.without_url(),
+                    "attempt_failed"
+                );
+                return Err("upstream read failed");
+            }
+        };
+
+        let duration_ms = elapsed_ms(attempt_start);
+
+        if http_status != StatusCode::OK {
+            warn!(
+                attempt,
+                upstream = %upstream,
+                duration_ms,
+                http_status = http_status.as_u16(),
+                error = "upstream returned error status",
+                "attempt_failed"
+            );
+            return Err("upstream returned error status");
+        }
 
         info!(
-            attempt=%attempt,
-            upstream=%&handler.label,
-            "attempt_started"
+            attempt,
+            upstream = %upstream,
+            duration_ms,
+            http_status = http_status.as_u16(),
+            response_bytes = body.len(),
+            "attempt_succeeded"
         );
-
-        let res = handler.proxy(body).await.map_err(|err| {
-            span.record("duration_ms", attempt_start.elapsed().as_millis() as u64);
-            error!(error = %err, "upstream request failed");
-            "upstream unreachable"
-        })?;
-
-        let status = res.status();
-        span.record("http_status", status.as_u16());
-
-        let body = res.bytes().await.map_err(|err| {
-            span.record("duration_ms", attempt_start.elapsed().as_millis() as u64);
-            error!(error = %err, "reading upstream body failed");
-            "upstream read failed"
-        })?;
-
-        span.record("duration_ms", attempt_start.elapsed().as_millis() as u64);
-        span.record("response_bytes", body.len());
-
-        if !status.is_success() {
-            warn!("upstream returned error status");
-            return Err("upstream returned error status");
-        } else {
-            info!("attempt succeeded");
-            Ok((status, [(header::CONTENT_TYPE, "application/json")], body).into_response())
-        }
+        Ok((http_status, [(header::CONTENT_TYPE, "application/json")], body).into_response())
     }
 }
 
+fn elapsed_ms(since: Instant) -> u64 {
+    since.elapsed().as_millis() as u64
+}
+
+/// Peeks at the first non-whitespace byte rather than deserialising, so the body
+/// stays raw passthrough.
 fn check_if_batch(body: &Bytes) -> bool {
-    matches!(
-        serde_json::from_slice::<serde_json::Value>(body),
-        Ok(serde_json::Value::Array(_))
-    )
+    body.iter()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .is_some_and(|byte| *byte == b'[')
 }
 
 fn rpc_error(code: i64, msg: &str) -> Response {
