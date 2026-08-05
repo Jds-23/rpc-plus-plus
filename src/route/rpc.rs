@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use axum::{body::Bytes, extract::State, response::Response};
 
-use crate::rpc_handler::round_robin_handler::RoundRobinHandler;
+use crate::proxy::ProxyState;
 
-pub async fn rpc_proxy(State(state): State<RoundRobinHandler>, body: Bytes) -> Response {
+pub async fn rpc_proxy(State(state): State<Arc<ProxyState>>, body: Bytes) -> Response {
     state.proxy(body).await
 }

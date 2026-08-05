@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 use rpc_plus_plus::{
-    route, rpc_handler::round_robin_handler::RoundRobinHandlerBuilder, settings,
+    decider::round_robin::RoundRobin, proxy::ProxyStateBuilder, route, settings,
     start_up::build_handlers, telemetry,
 };
 
@@ -16,18 +18,24 @@ async fn main() {
     };
 
     let handlers = build_handlers(settings.rpcs, settings.rpc_timeout_in_secs);
+    let upstream_count = handlers.len();
 
-    if handlers.is_empty() {
-        tracing::error!("zero handlers created");
-        std::process::exit(1);
-    }
+    let decider = match RoundRobin::new(handlers) {
+        Ok(decider) => decider,
+        Err(err) => {
+            tracing::error!(error = %err, "failed to build decider");
+            std::process::exit(1);
+        }
+    };
 
-    tracing::info!(count=%&handlers.len(),"starting proxy");
+    tracing::info!(count = upstream_count, "starting proxy");
 
-    let state = match RoundRobinHandlerBuilder::default()
+    let decider = Arc::new(decider);
+
+    let state = match ProxyStateBuilder::default()
         .with_max_attempt(settings.max_attempt)
         .with_retry_after_in_secs(settings.retry_after_in_secs)
-        .with_handlers(handlers)
+        .with_decider(decider)
         .build()
     {
         Ok(state) => state,
@@ -37,7 +45,7 @@ async fn main() {
         }
     };
 
-    let app = route::build_router(state);
+    let app = route::build_router(Arc::new(state));
 
     let listener =
         tokio::net::TcpListener::bind(format!("127.0.0.1:{}", settings.application_port))

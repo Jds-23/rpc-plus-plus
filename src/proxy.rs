@@ -1,9 +1,3 @@
-use crate::{
-    decider::{Decider, RoundRobin},
-    rpc_handler::RpcHandler,
-    settings::RpcSettings,
-    start_up::build_handlers,
-};
 use axum::{
     body::Bytes,
     response::{IntoResponse, Response},
@@ -16,46 +10,35 @@ use std::{
 use tracing::{Instrument, error, info, info_span, warn};
 use uuid::Uuid;
 
-pub type RoundRobinHandler = Arc<Inner>;
+use crate::{decider::Decider, rpc_handler::RpcHandler};
 
 const DEFAULT_MAX_ATTEMPT: u64 = 3;
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
 
+pub struct ProxyState {
+    decider: Arc<dyn Decider>,
+    max_attempt: usize,
+    retry_after: Duration,
+}
+
 #[derive(Debug, thiserror::Error)]
-pub enum StateBuildError {
-    #[error("no rpc handlers were provided")]
-    NoHandlers,
+pub enum ProxyStateBuildError {
+    #[error("no decider was provided")]
+    NoDecider,
     #[error("max_attempt must be at least 1")]
     ZeroMaxAttempt,
 }
 
-#[derive(Debug, Default)]
-pub struct RoundRobinHandlerBuilder {
-    handlers: Vec<RpcHandler>,
+#[derive(Default)]
+pub struct ProxyStateBuilder {
+    decider: Option<Arc<dyn Decider>>,
     max_attempt: Option<u64>,
     retry_after: Option<Duration>,
 }
 
-impl RoundRobinHandlerBuilder {
-    pub fn with_rpc_settings<I>(mut self, rpc_settings: I, rpc_timeout_in_secs: u64) -> Self
-    where
-        I: IntoIterator<Item = RpcSettings>,
-    {
-        let handlers = build_handlers(rpc_settings, rpc_timeout_in_secs);
-        self.handlers.extend(handlers);
-        self
-    }
-
-    pub fn with_handlers<I>(mut self, handlers: I) -> Self
-    where
-        I: IntoIterator<Item = RpcHandler>,
-    {
-        self.handlers.extend(handlers);
-        self
-    }
-
-    pub fn with_handler(mut self, handler: RpcHandler) -> Self {
-        self.handlers.push(handler);
+impl ProxyStateBuilder {
+    pub fn with_decider(mut self, decider: Arc<dyn Decider>) -> Self {
+        self.decider = Some(decider);
         self
     }
 
@@ -73,44 +56,23 @@ impl RoundRobinHandlerBuilder {
         self.with_retry_after(Duration::from_secs(secs))
     }
 
-    pub fn build(self) -> Result<RoundRobinHandler, StateBuildError> {
-        if self.handlers.is_empty() {
-            return Err(StateBuildError::NoHandlers);
-        }
+    pub fn build(self) -> Result<ProxyState, ProxyStateBuildError> {
+        let decider = self.decider.ok_or(ProxyStateBuildError::NoDecider)?;
 
         let max_attempt = self.max_attempt.unwrap_or(DEFAULT_MAX_ATTEMPT);
         if max_attempt == 0 {
-            return Err(StateBuildError::ZeroMaxAttempt);
+            return Err(ProxyStateBuildError::ZeroMaxAttempt);
         }
 
-        Ok(Arc::new(Inner::new(
-            self.handlers,
-            max_attempt,
-            self.retry_after.unwrap_or(DEFAULT_RETRY_AFTER),
-        )))
+        Ok(ProxyState {
+            decider,
+            max_attempt: max_attempt as usize,
+            retry_after: self.retry_after.unwrap_or(DEFAULT_RETRY_AFTER),
+        })
     }
 }
 
-pub struct Inner {
-    handler: RoundRobin<RpcHandler>,
-    max_attempt: u64,
-    retry_after: Duration,
-}
-
-impl Inner {
-    /// Crate-private: the builder is the only supported constructor, and it is
-    /// what guarantees a non-empty rotation and `max_attempt >= 1`.
-    pub(crate) fn new(
-        rpc_handlers: Vec<RpcHandler>,
-        max_attempt: u64,
-        retry_after: Duration,
-    ) -> Self {
-        Inner {
-            handler: RoundRobin::new(rpc_handlers),
-            max_attempt,
-            retry_after,
-        }
-    }
+impl ProxyState {
     pub async fn proxy(&self, body: Bytes) -> Response {
         let request_id = Uuid::new_v4();
         let span = info_span!("proxy", %request_id);
@@ -126,33 +88,37 @@ impl Inner {
             return StatusCode::BAD_REQUEST.into_response();
         }
 
-        // "unreachable" unless a read is what actually failed last
-        let mut last_failure = "upstream unreachable";
-        let mut tried: Vec<&str> = Vec::with_capacity(self.max_attempt as usize);
-        let mut attempts = 0;
+        let handler_chain = self.decider.decide(self.max_attempt);
+        let mut tried: Vec<&str> = Vec::with_capacity(handler_chain.len());
 
-        for attempt in 1..=self.max_attempt {
-            if attempt > 1 {
+        // An empty chain skips the loop and falls through to `retries_exhausted`
+        // with zero attempts, rather than inventing an event name outside the
+        // logging schema. `RoundRobin` cannot return empty — the builder rejects
+        // `max_attempt == 0` and `RoundRobin::new` rejects an empty rotation — but
+        // a health-scored `Decider` legitimately can once every upstream is
+        // scored out.
+        let mut last_failure = if handler_chain.is_empty() {
+            "no upstream available"
+        } else {
+            // "unreachable" unless a read is what actually failed last
+            "upstream unreachable"
+        };
+
+        for handler in &handler_chain {
+            if tried.len() >= self.max_attempt {
+                break;
+            }
+            if !tried.is_empty() {
                 tokio::time::sleep(self.retry_after).await;
             }
+            tried.push(handler.label());
 
-            // The builder rejects an empty rotation, so this is defensive only.
-            // Fall through to `retries_exhausted` rather than inventing an event
-            // name outside the logging schema.
-            let Some(handler) = self.handler.decide() else {
-                last_failure = "no upstream available";
-                attempts = attempt - 1;
-                break;
-            };
-            tried.push(&handler.label);
-            attempts = attempt;
-
-            match Self::try_once(handler, &body, attempt).await {
+            match Self::try_once(handler, &body, tried.len() as u64).await {
                 Ok(response) => {
                     info!(
                         event = "request_completed",
-                        attempts = attempt,
-                        upstream = %handler.label,
+                        attempts = tried.len(),
+                        upstream = %handler.label(),
                         duration_ms = elapsed_ms(received_at),
                     );
                     return response;
@@ -163,7 +129,7 @@ impl Inner {
 
         error!(
             event = "retries_exhausted",
-            attempts,
+            attempts = tried.len(),
             tried = ?tried,
             duration_ms = elapsed_ms(received_at),
             error = last_failure,
@@ -177,7 +143,7 @@ impl Inner {
         attempt: u64,
     ) -> Result<Response, &'static str> {
         let attempt_start = Instant::now();
-        let upstream = handler.label.as_str();
+        let upstream = handler.label();
 
         info!(event = "attempt_started", attempt, upstream = %upstream);
 
