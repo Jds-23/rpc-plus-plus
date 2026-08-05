@@ -138,7 +138,11 @@ impl ProxyState {
         rpc_error(-32603, &last_failure)
     }
 
-    async fn try_once(handler: &RpcHandler, body: &Bytes, attempt: u64) -> Result<Response, String> {
+    async fn try_once(
+        handler: &RpcHandler,
+        body: &Bytes,
+        attempt: u64,
+    ) -> Result<Response, String> {
         let attempt_start = Instant::now();
         let upstream = handler.label();
 
