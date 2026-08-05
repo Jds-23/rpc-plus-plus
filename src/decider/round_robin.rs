@@ -19,26 +19,21 @@ impl Decider for RoundRobin {
         let (head, tail) = self.items.split_at(start);
         tail.iter().chain(head).take(max).cloned().collect()
     }
-
-    fn active_list_count(&self) -> usize {
-        self.items.len()
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ProxyBuildError {
-    #[error("handlers is emtpy")]
+pub enum RoundRobinBuildError {
+    #[error("handlers is empty")]
     EmptyHandlers,
 }
 
 impl RoundRobin {
-    pub fn new(handlers: impl IntoIterator<Item = RpcHandler>) -> Result<Self, ProxyBuildError> {
-        let handlers: Vec<Arc<RpcHandler>> = handlers
-            .into_iter()
-            .map(Arc::new)
-            .collect();
+    pub fn new(
+        handlers: impl IntoIterator<Item = RpcHandler>,
+    ) -> Result<Self, RoundRobinBuildError> {
+        let handlers: Vec<Arc<RpcHandler>> = handlers.into_iter().map(Arc::new).collect();
         if handlers.is_empty() {
-            return Err(ProxyBuildError::EmptyHandlers);
+            return Err(RoundRobinBuildError::EmptyHandlers);
         }
         Ok(RoundRobin {
             items: handlers,

@@ -1,12 +1,8 @@
 use std::sync::Arc;
 
 use rpc_plus_plus::{
-    decider::{Decider, round_robin::RoundRobin},
-    route,
-    rpc_handler::proxy::ProxyBuilder,
-    settings,
-    start_up::build_handlers,
-    telemetry,
+    decider::round_robin::RoundRobin, route, rpc_handler::proxy::ProxyBuilder, settings,
+    start_up::build_handlers, telemetry,
 };
 
 #[tokio::main]
@@ -22,6 +18,7 @@ async fn main() {
     };
 
     let handlers = build_handlers(settings.rpcs, settings.rpc_timeout_in_secs);
+    let upstream_count = handlers.len();
 
     let decider = match RoundRobin::new(handlers) {
         Ok(decider) => decider,
@@ -31,7 +28,7 @@ async fn main() {
         }
     };
 
-    tracing::info!(count=%&decider.active_list_count(),"starting proxy");
+    tracing::info!(count = upstream_count, "starting proxy");
 
     let decider = Arc::new(decider);
 

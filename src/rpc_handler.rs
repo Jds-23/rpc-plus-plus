@@ -1,5 +1,4 @@
 pub mod proxy;
-pub mod round_robin_handler;
 
 use std::{fmt::Debug, time::Duration};
 

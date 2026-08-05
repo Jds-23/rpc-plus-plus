@@ -17,7 +17,7 @@ const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 pub struct Proxy {
     decider: Arc<dyn Decider>,
-    max_attempt: u64,
+    max_attempt: usize,
     retry_after: Duration,
 }
 
@@ -66,7 +66,7 @@ impl ProxyBuilder {
 
         Ok(Proxy {
             decider,
-            max_attempt,
+            max_attempt: max_attempt as usize,
             retry_after: self.retry_after.unwrap_or(DEFAULT_RETRY_AFTER),
         })
     }
@@ -88,22 +88,24 @@ impl Proxy {
             return StatusCode::BAD_REQUEST.into_response();
         }
 
-        // "unreachable" unless a read is what actually failed last
-        let mut last_failure = "upstream unreachable";
-        let mut tried: Vec<&str> = Vec::with_capacity(self.max_attempt as usize);
+        let handler_chain = self.decider.decide(self.max_attempt);
+        let mut tried: Vec<&str> = Vec::with_capacity(handler_chain.len());
 
-        let handler_chain = self.decider.decide(self.max_attempt as usize);
-        if handler_chain.is_empty() {
-            error!(
-                event = "no_upstream_available",
-                duration_ms = elapsed_ms(received_at),
-                error = "no upstream available",
-            );
-            return rpc_error(-32603, "no_upstream_available");
-        }
-        let iter = handler_chain.iter();
-        for handler in iter {
-            if tried.len() >= self.max_attempt as usize {
+        // An empty chain skips the loop and falls through to `retries_exhausted`
+        // with zero attempts, rather than inventing an event name outside the
+        // logging schema. `RoundRobin` cannot return empty — the builder rejects
+        // `max_attempt == 0` and `RoundRobin::new` rejects an empty rotation — but
+        // a health-scored `Decider` legitimately can once every upstream is
+        // scored out.
+        let mut last_failure = if handler_chain.is_empty() {
+            "no upstream available"
+        } else {
+            // "unreachable" unless a read is what actually failed last
+            "upstream unreachable"
+        };
+
+        for handler in &handler_chain {
+            if tried.len() >= self.max_attempt {
                 break;
             }
             if !tried.is_empty() {
@@ -141,7 +143,7 @@ impl Proxy {
         attempt: u64,
     ) -> Result<Response, &'static str> {
         let attempt_start = Instant::now();
-        let upstream = handler.label.as_str();
+        let upstream = handler.label();
 
         info!(event = "attempt_started", attempt, upstream = %upstream);
 
