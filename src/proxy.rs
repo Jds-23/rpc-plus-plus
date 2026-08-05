@@ -15,14 +15,14 @@ use crate::{decider::Decider, rpc_handler::RpcHandler};
 const DEFAULT_MAX_ATTEMPT: u64 = 3;
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
 
-pub struct Proxy {
+pub struct ProxyState {
     decider: Arc<dyn Decider>,
     max_attempt: usize,
     retry_after: Duration,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ProxyBuildError {
+pub enum ProxyStateBuildError {
     #[error("no decider was provided")]
     NoDecider,
     #[error("max_attempt must be at least 1")]
@@ -30,13 +30,13 @@ pub enum ProxyBuildError {
 }
 
 #[derive(Default)]
-pub struct ProxyBuilder {
+pub struct ProxyStateBuilder {
     decider: Option<Arc<dyn Decider>>,
     max_attempt: Option<u64>,
     retry_after: Option<Duration>,
 }
 
-impl ProxyBuilder {
+impl ProxyStateBuilder {
     pub fn with_decider(mut self, decider: Arc<dyn Decider>) -> Self {
         self.decider = Some(decider);
         self
@@ -56,15 +56,15 @@ impl ProxyBuilder {
         self.with_retry_after(Duration::from_secs(secs))
     }
 
-    pub fn build(self) -> Result<Proxy, ProxyBuildError> {
-        let decider = self.decider.ok_or(ProxyBuildError::NoDecider)?;
+    pub fn build(self) -> Result<ProxyState, ProxyStateBuildError> {
+        let decider = self.decider.ok_or(ProxyStateBuildError::NoDecider)?;
 
         let max_attempt = self.max_attempt.unwrap_or(DEFAULT_MAX_ATTEMPT);
         if max_attempt == 0 {
-            return Err(ProxyBuildError::ZeroMaxAttempt);
+            return Err(ProxyStateBuildError::ZeroMaxAttempt);
         }
 
-        Ok(Proxy {
+        Ok(ProxyState {
             decider,
             max_attempt: max_attempt as usize,
             retry_after: self.retry_after.unwrap_or(DEFAULT_RETRY_AFTER),
@@ -72,7 +72,7 @@ impl ProxyBuilder {
     }
 }
 
-impl Proxy {
+impl ProxyState {
     pub async fn proxy(&self, body: Bytes) -> Response {
         let request_id = Uuid::new_v4();
         let span = info_span!("proxy", %request_id);

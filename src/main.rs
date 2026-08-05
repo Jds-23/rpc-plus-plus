@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use rpc_plus_plus::{
-    decider::round_robin::RoundRobin, route, rpc_handler::proxy::ProxyBuilder, settings,
+    decider::round_robin::RoundRobin, proxy::ProxyStateBuilder, route, settings,
     start_up::build_handlers, telemetry,
 };
 
@@ -32,7 +32,7 @@ async fn main() {
 
     let decider = Arc::new(decider);
 
-    let state = match ProxyBuilder::default()
+    let state = match ProxyStateBuilder::default()
         .with_max_attempt(settings.max_attempt)
         .with_retry_after_in_secs(settings.retry_after_in_secs)
         .with_decider(decider)

@@ -1,5 +1,3 @@
-pub mod proxy;
-
 use std::{fmt::Debug, time::Duration};
 
 use anyhow::{Context, Result};

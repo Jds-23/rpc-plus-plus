@@ -2,7 +2,7 @@ pub mod mock_rpc_server;
 use std::sync::Arc;
 
 use rpc_plus_plus::{
-    decider::round_robin::RoundRobin, route::build_router, rpc_handler::proxy::Proxy,
+    decider::round_robin::RoundRobin, proxy::ProxyState, route::build_router,
     settings::RpcSettings, start_up::build_handlers,
 };
 
@@ -13,7 +13,7 @@ pub fn round_robin(upstreams: Vec<RpcSettings>) -> Arc<RoundRobin> {
     Arc::new(RoundRobin::new(handlers).expect("decider build failed"))
 }
 
-pub async fn spawn_app(state: Arc<Proxy>) -> String {
+pub async fn spawn_app(state: Arc<ProxyState>) -> String {
     let app = build_router(state);
     // port 0 => OS picks a free port, tests can run in parallel
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

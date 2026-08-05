@@ -1,4 +1,5 @@
 pub mod decider;
+pub mod proxy;
 pub mod route;
 pub mod rpc_handler;
 pub mod settings;

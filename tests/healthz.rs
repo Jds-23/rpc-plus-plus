@@ -4,8 +4,8 @@ use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use reqwest::StatusCode;
 use rpc_plus_plus::{
-    decider::round_robin::RoundRobin, route, rpc_handler::proxy::ProxyBuilder,
-    settings::RpcSettings, start_up::build_handlers,
+    decider::round_robin::RoundRobin, proxy::ProxyStateBuilder, route, settings::RpcSettings,
+    start_up::build_handlers,
 };
 use tower::ServiceExt;
 
@@ -18,7 +18,7 @@ async fn healthz_returns_ok() {
     let rcp_handlers = build_handlers(upstream, 1);
     let decider = Arc::new(RoundRobin::new(rcp_handlers).expect("decider build failed"));
 
-    let state = ProxyBuilder::default()
+    let state = ProxyStateBuilder::default()
         .with_decider(decider)
         .build()
         .expect("State build failed");
