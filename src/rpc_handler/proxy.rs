@@ -101,15 +101,15 @@ impl Proxy {
             );
             return rpc_error(-32603, "no_upstream_available");
         }
-        let mut iter = handler_chain.iter();
-        while let Some(handler) = iter.next() {
+        let iter = handler_chain.iter();
+        for handler in iter {
             if tried.len() >= self.max_attempt as usize {
                 break;
             }
-            if tried.len() > 0 {
+            if !tried.is_empty() {
                 tokio::time::sleep(self.retry_after).await;
             }
-            tried.push(&handler.label());
+            tried.push(handler.label());
 
             match Self::try_once(handler, &body, tried.len() as u64).await {
                 Ok(response) => {

@@ -35,7 +35,7 @@ impl RoundRobin {
     pub fn new(handlers: impl IntoIterator<Item = RpcHandler>) -> Result<Self, ProxyBuildError> {
         let handlers: Vec<Arc<RpcHandler>> = handlers
             .into_iter()
-            .map(|handler| Arc::new(handler))
+            .map(Arc::new)
             .collect();
         if handlers.is_empty() {
             return Err(ProxyBuildError::EmptyHandlers);
