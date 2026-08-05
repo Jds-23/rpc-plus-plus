@@ -1,56 +1,28 @@
-use std::sync::Arc;
-
-use rpc_plus_plus::{
-    decider::round_robin::RoundRobin, proxy::ProxyStateBuilder, route, settings,
-    start_up::build_handlers, telemetry,
-};
+use rpc_plus_plus::{settings, start_up, telemetry};
 
 #[tokio::main]
 async fn main() {
     telemetry::init();
 
-    let settings = match settings::get_settings() {
-        Ok(settings) => settings,
+    // Both arms fail the same way, so they collapse into one `startup_failed`
+    // call site rather than one per construction step.
+    let started = match settings::get_settings() {
+        Ok(settings) => start_up::start(settings).await,
+        Err(err) => Err(err),
+    };
+
+    let (listener, app) = match started {
+        Ok(started) => started,
         Err(err) => {
-            tracing::error!(error = format!("{err:#}"), "failed to load settings");
+            // `{err:#}` walks the anyhow context chain; plain Display stops at
+            // the outermost frame and drops the cause.
+            tracing::error!(event = "startup_failed", error = format!("{err:#}"));
             std::process::exit(1);
         }
     };
 
-    let handlers = build_handlers(settings.rpcs, settings.rpc_timeout_in_secs);
-    let upstream_count = handlers.len();
-
-    let decider = match RoundRobin::new(handlers) {
-        Ok(decider) => decider,
-        Err(err) => {
-            tracing::error!(error = %err, "failed to build decider");
-            std::process::exit(1);
-        }
-    };
-
-    tracing::info!(count = upstream_count, "starting proxy");
-
-    let decider = Arc::new(decider);
-
-    let state = match ProxyStateBuilder::default()
-        .with_max_attempt(settings.max_attempt)
-        .with_retry_after_in_secs(settings.retry_after_in_secs)
-        .with_decider(decider)
-        .build()
-    {
-        Ok(state) => state,
-        Err(err) => {
-            tracing::error!(error = %err, "failed to build proxy state");
-            std::process::exit(1);
-        }
-    };
-
-    let app = route::build_router(Arc::new(state));
-
-    let listener =
-        tokio::net::TcpListener::bind(format!("127.0.0.1:{}", settings.application_port))
-            .await
-            .unwrap();
-
-    axum::serve(listener, app).await.unwrap();
+    if let Err(err) = axum::serve(listener, app).await {
+        tracing::error!(event = "server_stopped", error = %err);
+        std::process::exit(1);
+    }
 }
