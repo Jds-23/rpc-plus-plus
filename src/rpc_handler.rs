@@ -1,3 +1,4 @@
+pub mod proxy;
 pub mod round_robin_handler;
 
 use std::{fmt::Debug, time::Duration};
@@ -61,6 +62,10 @@ impl RpcHandlerBuilder {
 }
 
 impl RpcHandler {
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
     pub async fn proxy(&self, body: &Bytes) -> Result<reqwest::Response, reqwest::Error> {
         self.http
             .post(&self.url)
