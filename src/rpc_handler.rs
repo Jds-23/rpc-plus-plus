@@ -2,7 +2,7 @@ use std::{fmt::Debug, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::body::Bytes;
-use reqwest::header;
+use reqwest::{StatusCode, header};
 
 pub struct RpcHandler {
     http: reqwest::Client,
@@ -58,6 +58,25 @@ impl RpcHandlerBuilder {
     }
 }
 
+// #[derive(Debug, Clone)]
+pub struct AttemptResult {
+    pub http_status: StatusCode,
+    pub response_body: Bytes,
+}
+
+pub enum AttemptError {
+    Unreachable {
+        error: String,
+    },
+    ReadFailed {
+        http_status: StatusCode,
+        error: String,
+    },
+    ErrorStatus {
+        http_status: StatusCode,
+    },
+}
+
 impl RpcHandler {
     pub fn label(&self) -> &str {
         &self.label
@@ -71,4 +90,44 @@ impl RpcHandler {
             .send()
             .await
     }
+
+    pub async fn attempt(&self, body: &Bytes) -> Result<AttemptResult, AttemptError> {
+        let res = self.proxy(body).await.map_err(|err| {
+            let error = error_chain(&err.without_url());
+            AttemptError::Unreachable { error }
+        })?;
+
+        let http_status = res.status();
+
+        let body = res.bytes().await.map_err(|err| {
+            let error = error_chain(&err.without_url());
+            AttemptError::ReadFailed { http_status, error }
+        })?;
+
+        if http_status != StatusCode::OK {
+            return Err(AttemptError::ErrorStatus { http_status });
+        }
+
+        Ok(AttemptResult {
+            http_status,
+            response_body: body,
+        })
+    }
+}
+
+/// `reqwest::Error`'s own `Display` stops at `error sending request`, which names
+/// no cause. Walking `source()` yields the transport frame that actually failed.
+///
+/// Only ever called on an error already passed through `without_url`; the
+/// remaining frames are transport-level and carry no path, which is where the API
+/// key lives.
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
 }

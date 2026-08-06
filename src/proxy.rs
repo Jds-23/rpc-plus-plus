@@ -11,7 +11,10 @@ use std::{
 use tracing::{Instrument, error, info, info_span, warn};
 use uuid::Uuid;
 
-use crate::{decider::Decider, rpc_handler::RpcHandler};
+use crate::{
+    decider::Decider,
+    rpc_handler::{AttemptError, AttemptResult, RpcHandler},
+};
 
 const DEFAULT_MAX_ATTEMPT: u64 = 3;
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
@@ -145,14 +148,27 @@ impl ProxyState {
     ) -> Result<Response, String> {
         let attempt_start = Instant::now();
         let upstream = handler.label();
-
-        info!(event = "attempt_started", attempt, upstream = %upstream);
-
-        let res = match handler.proxy(body).await {
-            Ok(res) => res,
-            Err(err) => {
-                // `without_url` strips the upstream URL, which embeds the API key.
-                let error = error_chain(&err.without_url());
+        match handler.attempt(body).await {
+            Ok(AttemptResult {
+                http_status,
+                response_body,
+            }) => {
+                info!(
+                    event = "attempt_succeeded",
+                    attempt,
+                    upstream = %upstream,
+                    duration_ms = elapsed_ms(attempt_start),
+                    http_status = http_status.as_u16(),
+                    response_bytes = response_body.len(),
+                );
+                Ok((
+                    http_status,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    response_body,
+                )
+                    .into_response())
+            }
+            Err(AttemptError::Unreachable { error }) => {
                 warn!(
                     event = "attempt_failed",
                     attempt,
@@ -160,16 +176,9 @@ impl ProxyState {
                     duration_ms = elapsed_ms(attempt_start),
                     error = %error,
                 );
-                return Err(error);
+                Err(error)
             }
-        };
-
-        let http_status = res.status();
-
-        let body = match res.bytes().await {
-            Ok(body) => body,
-            Err(err) => {
-                let error = error_chain(&err.without_url());
+            Err(AttemptError::ReadFailed { http_status, error }) => {
                 warn!(
                     event = "attempt_failed",
                     attempt,
@@ -178,65 +187,28 @@ impl ProxyState {
                     http_status = http_status.as_u16(),
                     error = %error,
                 );
-                return Err(error);
+                Err(error)
             }
-        };
-
-        let duration_ms = elapsed_ms(attempt_start);
-
-        if http_status != StatusCode::OK {
-            warn!(
-                event = "attempt_failed",
-                attempt,
-                upstream = %upstream,
-                duration_ms,
-                http_status = http_status.as_u16(),
-                error = "upstream returned error status",
-            );
-            // The status rides its own field here, but `retries_exhausted` has no
-            // `http_status`, so the returned text carries it.
-            return Err(format!(
-                "upstream returned error status {}",
-                http_status.as_u16()
-            ));
+            Err(AttemptError::ErrorStatus { http_status }) => {
+                warn!(
+                    event = "attempt_failed",
+                    attempt,
+                    upstream = %upstream,
+                    duration_ms = elapsed_ms(attempt_start),
+                    http_status = http_status.as_u16(),
+                    error = "upstream returned error status",
+                );
+                Err(format!(
+                    "upstream returned error status {}",
+                    http_status.as_u16()
+                ))
+            }
         }
-
-        info!(
-            event = "attempt_succeeded",
-            attempt,
-            upstream = %upstream,
-            duration_ms,
-            http_status = http_status.as_u16(),
-            response_bytes = body.len(),
-        );
-        Ok((
-            http_status,
-            [(header::CONTENT_TYPE, "application/json")],
-            body,
-        )
-            .into_response())
     }
 }
 
 fn elapsed_ms(since: Instant) -> u64 {
     since.elapsed().as_millis() as u64
-}
-
-/// `reqwest::Error`'s own `Display` stops at `error sending request`, which names
-/// no cause. Walking `source()` yields the transport frame that actually failed.
-///
-/// Only ever called on an error already passed through `without_url`; the
-/// remaining frames are transport-level and carry no path, which is where the API
-/// key lives.
-fn error_chain(err: &dyn std::error::Error) -> String {
-    let mut out = err.to_string();
-    let mut source = err.source();
-    while let Some(cause) = source {
-        out.push_str(": ");
-        out.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    out
 }
 
 /// Peeks at the first non-whitespace byte rather than deserialising, so the body
