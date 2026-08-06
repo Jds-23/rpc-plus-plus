@@ -1,20 +1,46 @@
-use std::{fmt::Debug, time::Duration};
+use std::{fmt, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::body::Bytes;
 use reqwest::{StatusCode, header};
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct UpstreamId(Arc<str>);
+
+impl UpstreamId {
+    pub fn new(label: impl Into<Arc<str>>) -> Self {
+        UpstreamId(label.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for UpstreamId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&*self.0, f)
+    }
+}
+
+impl fmt::Display for UpstreamId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 pub struct Upstream {
     http: reqwest::Client,
     url: String,
-    label: String,
+    id: UpstreamId,
 }
 
-impl Debug for Upstream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.label)
+impl fmt::Debug for Upstream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.id)
     }
 }
+
 #[derive(Default)]
 pub struct UpstreamBuilder {
     label: Option<String>,
@@ -44,7 +70,7 @@ impl UpstreamBuilder {
 
     pub fn build(self) -> Result<Upstream> {
         let url = self.url.context("url is not set")?;
-        let label = self.label.context("label is not set")?;
+        let id = UpstreamId::new(self.label.context("label is not set")?);
         let rpc_timeout_in_secs = self
             .rpc_timeout_in_secs
             .context("rpc_timeout_in_secs is not set")?;
@@ -54,7 +80,7 @@ impl UpstreamBuilder {
             .build()
             .context("failed to build HTTP client")?;
 
-        Ok(Upstream { http, url, label })
+        Ok(Upstream { http, url, id })
     }
 }
 
@@ -78,8 +104,14 @@ pub enum CallError {
 }
 
 impl Upstream {
+    /// Identity — what per-attempt records key on.
+    pub fn id(&self) -> &UpstreamId {
+        &self.id
+    }
+
+    /// The same string, for log lines that want it rendered rather than keyed.
     pub fn label(&self) -> &str {
-        &self.label
+        self.id.as_str()
     }
 
     async fn send(&self, body: &Bytes) -> Result<reqwest::Response, reqwest::Error> {
