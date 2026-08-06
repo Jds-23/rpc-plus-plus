@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     decider::Decider,
+    observer::Observer,
     rpc_handler::{AttemptError, AttemptResult, RpcHandler},
 };
 
@@ -20,6 +21,7 @@ const DEFAULT_MAX_ATTEMPT: u64 = 3;
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 pub struct ProxyState {
+    observer: Arc<dyn Observer>,
     decider: Arc<dyn Decider>,
     max_attempt: usize,
     retry_after: Duration,
@@ -29,12 +31,15 @@ pub struct ProxyState {
 pub enum ProxyStateBuildError {
     #[error("no decider was provided")]
     NoDecider,
+    #[error("no observer was provided")]
+    NoObserver,
     #[error("max_attempt must be at least 1")]
     ZeroMaxAttempt,
 }
 
 #[derive(Default)]
 pub struct ProxyStateBuilder {
+    observer: Option<Arc<dyn Observer>>,
     decider: Option<Arc<dyn Decider>>,
     max_attempt: Option<u64>,
     retry_after: Option<Duration>,
@@ -43,6 +48,11 @@ pub struct ProxyStateBuilder {
 impl ProxyStateBuilder {
     pub fn with_decider(mut self, decider: Arc<dyn Decider>) -> Self {
         self.decider = Some(decider);
+        self
+    }
+
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = Some(observer);
         self
     }
 
@@ -62,6 +72,7 @@ impl ProxyStateBuilder {
 
     pub fn build(self) -> Result<ProxyState, ProxyStateBuildError> {
         let decider = self.decider.ok_or(ProxyStateBuildError::NoDecider)?;
+        let observer = self.observer.ok_or(ProxyStateBuildError::NoObserver)?;
 
         let max_attempt = self.max_attempt.unwrap_or(DEFAULT_MAX_ATTEMPT);
         if max_attempt == 0 {
@@ -70,6 +81,7 @@ impl ProxyStateBuilder {
 
         Ok(ProxyState {
             decider,
+            observer,
             max_attempt: max_attempt as usize,
             retry_after: self.retry_after.unwrap_or(DEFAULT_RETRY_AFTER),
         })
