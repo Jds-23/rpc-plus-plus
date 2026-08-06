@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Instant};
 
 use reqwest::StatusCode;
-use rpc_plus_plus::{proxy::ProxyStateBuilder, settings::RpcSettings};
+use rpc_plus_plus::{observer::NoopObserver, proxy::ProxyStateBuilder, settings::RpcSettings};
 use serde_json::json;
 
 use crate::common::{mock_rpc_server, round_robin, spawn_app};
@@ -15,8 +15,11 @@ async fn proxies_reponse_from_upstream() {
         label: "one".to_string(),
         rpc_url: mock_rpc_server.uri(),
     }];
+    let observer = Arc::new(NoopObserver::new());
+
     let state = ProxyStateBuilder::default()
         .with_decider(round_robin(upstreams))
+        .with_observer(observer)
         .build()
         .expect("State build failed");
     let addr = spawn_app(Arc::new(state)).await;
@@ -48,6 +51,7 @@ async fn round_robin_distributes_evenly() {
     ];
     let state = ProxyStateBuilder::default()
         .with_decider(round_robin(upstreams))
+        .with_observer(Arc::new(NoopObserver::new()))
         .build()
         .expect("State build failed");
     let addr = spawn_app(Arc::new(state)).await;
@@ -90,6 +94,7 @@ async fn works_fine_when_one_uptream_works() {
     ];
     let state = ProxyStateBuilder::default()
         .with_decider(round_robin(upstreams))
+        .with_observer(Arc::new(NoopObserver::new()))
         .with_retry_after_in_secs(0)
         .build()
         .expect("State build failed");
@@ -131,6 +136,7 @@ async fn non_works_fine_retry_and_propagate_last_error() {
     ];
     let state = ProxyStateBuilder::default()
         .with_decider(round_robin(upstreams))
+        .with_observer(Arc::new(NoopObserver::new()))
         .with_max_attempt(2)
         .with_retry_after_in_secs(0)
         .build()
@@ -168,6 +174,7 @@ async fn single_upstream_is_tried_once() {
     }];
     let state = ProxyStateBuilder::default()
         .with_decider(round_robin(upstreams))
+        .with_observer(Arc::new(NoopObserver::new()))
         .with_max_attempt(3)
         .with_retry_after_in_secs(3)
         .build()
