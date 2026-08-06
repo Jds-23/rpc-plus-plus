@@ -1,4 +1,8 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::body::Bytes;
 use reqwest::{StatusCode, header};
@@ -111,23 +115,57 @@ impl UpstreamBuilder {
     }
 }
 
-// #[derive(Debug, Clone)]
+pub struct CallResult {
+    pub duration: Duration,
+    pub result: Result<CallOutcome, CallError>,
+}
+
+impl CallResult {
+    pub fn record(&self) -> CallRecord<'_> {
+        CallRecord {
+            duration: self.duration,
+            outcome: match &self.result {
+                Ok(outcome) => Ok(outcome.http_status),
+                Err(error) => Err(error),
+            },
+        }
+    }
+}
+
+pub struct CallRecord<'a> {
+    pub duration: Duration,
+    pub outcome: Result<StatusCode, &'a CallError>,
+}
+
+#[derive(Debug)]
 pub struct CallOutcome {
     pub http_status: StatusCode,
     pub response_body: Bytes,
 }
 
+#[derive(Debug, thiserror::Error)]
 pub enum CallError {
-    Unreachable {
-        error: String,
-    },
+    #[error("{error}")]
+    Unreachable { error: String },
+    #[error("{error}")]
     ReadFailed {
         http_status: StatusCode,
         error: String,
     },
-    ErrorStatus {
-        http_status: StatusCode,
-    },
+    #[error("upstream returned error status {}", http_status.as_u16())]
+    ErrorStatus { http_status: StatusCode },
+}
+
+impl CallError {
+    /// `None` for `Unreachable`: no response arrived to carry a status.
+    pub fn http_status(&self) -> Option<StatusCode> {
+        match self {
+            CallError::Unreachable { .. } => None,
+            CallError::ReadFailed { http_status, .. } | CallError::ErrorStatus { http_status } => {
+                Some(*http_status)
+            }
+        }
+    }
 }
 
 impl Upstream {
@@ -145,7 +183,16 @@ impl Upstream {
             .await
     }
 
-    pub async fn call(&self, body: &Bytes) -> Result<CallOutcome, CallError> {
+    pub async fn call(&self, body: &Bytes) -> CallResult {
+        let attempt_start = Instant::now();
+        let result = self.call_inner(body).await;
+        CallResult {
+            result,
+            duration: attempt_start.elapsed(),
+        }
+    }
+
+    async fn call_inner(&self, body: &Bytes) -> Result<CallOutcome, CallError> {
         let res = self.send(body).await.map_err(|err| {
             let error = error_chain(&err.without_url());
             CallError::Unreachable { error }

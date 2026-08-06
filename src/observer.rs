@@ -1,26 +1,21 @@
-use std::time::Duration;
+use crate::upstream::{CallRecord, UpstreamId};
 
 pub trait Observer: Send + Sync + 'static {
-    fn record_success(&self, upstream: &str, duration: Duration);
-    fn record_failure(&self, upstream: &str, duration: Duration, http_status: Option<u16>);
+    fn record(&self, upstream: &UpstreamId, record: CallRecord<'_>);
 }
 
+#[derive(Default)]
 pub struct NoopObserver {}
 
 impl NoopObserver {
     pub fn new() -> Self {
-        NoopObserver {}
+        NoopObserver::default()
     }
 }
 
 impl Observer for NoopObserver {
-    fn record_failure(&self, upstream: &str, duration: Duration, http_status: Option<u16>) {
+    fn record(&self, upstream: &UpstreamId, record: CallRecord<'_>) {
         let _upstream = upstream;
-        let _duration = duration;
-        let _http_status = http_status;
-    }
-    fn record_success(&self, upstream: &str, duration: Duration) {
-        let _upstream = upstream;
-        let _duration = duration;
+        let _record = record;
     }
 }

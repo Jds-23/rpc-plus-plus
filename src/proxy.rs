@@ -107,18 +107,7 @@ impl ProxyState {
         let chain = self.decider.decide(self.max_attempt);
         let mut tried: Vec<&UpstreamId> = Vec::with_capacity(chain.len());
 
-        // An empty chain skips the loop and falls through to `retries_exhausted`
-        // with zero attempts, rather than inventing an event name outside the
-        // logging schema. `RoundRobin` cannot return empty — the builder rejects
-        // `max_attempt == 0` and `RoundRobin::new` rejects an empty rotation — but
-        // a health-scored `Decider` legitimately can once every upstream is
-        // scored out.
-        let mut last_failure = if chain.is_empty() {
-            "no upstream available".to_string()
-        } else {
-            // "unreachable" unless a read is what actually failed last
-            "upstream unreachable".to_string()
-        };
+        let mut last_failure: Option<CallError> = None;
 
         for upstream in &chain {
             if tried.len() >= self.max_attempt {
@@ -129,7 +118,7 @@ impl ProxyState {
             }
             tried.push(upstream.id());
 
-            match Self::try_once(upstream, &body, tried.len() as u64).await {
+            match self.try_once(upstream, &body, tried.len() as u64).await {
                 Ok(response) => {
                     info!(
                         event = "request_completed",
@@ -139,24 +128,37 @@ impl ProxyState {
                     );
                     return response;
                 }
-                Err(reason) => last_failure = reason,
+                Err(failure) => last_failure = Some(failure),
             }
         }
+
+        let error = match &last_failure {
+            Some(failure) => failure.to_string(),
+            None => "no upstream available".to_string(),
+        };
 
         error!(
             event = "retries_exhausted",
             attempts = tried.len(),
             tried = ?tried,
             duration_ms = elapsed_ms(received_at),
-            error = %last_failure,
+            error = %error,
         );
-        rpc_error(-32603, &last_failure)
+        rpc_error(-32603, &error)
     }
 
-    async fn try_once(upstream: &Upstream, body: &Bytes, attempt: u64) -> Result<Response, String> {
-        let attempt_start = Instant::now();
+    async fn try_once(
+        &self,
+        upstream: &Upstream,
+        body: &Bytes,
+        attempt: u64,
+    ) -> Result<Response, CallError> {
         let id = upstream.id();
-        match upstream.call(body).await {
+        let call = upstream.call(body).await;
+        self.observer.record(id, call.record());
+
+        let duration = call.duration.as_millis() as u64;
+        match call.result {
             Ok(CallOutcome {
                 http_status,
                 response_body,
@@ -165,7 +167,7 @@ impl ProxyState {
                     event = "attempt_succeeded",
                     attempt,
                     upstream = %id,
-                    duration_ms = elapsed_ms(attempt_start),
+                    duration_ms = duration,
                     http_status = http_status.as_u16(),
                     response_bytes = response_body.len(),
                 );
@@ -176,40 +178,33 @@ impl ProxyState {
                 )
                     .into_response())
             }
-            Err(CallError::Unreachable { error }) => {
-                warn!(
-                    event = "attempt_failed",
-                    attempt,
-                    upstream = %id,
-                    duration_ms = elapsed_ms(attempt_start),
-                    error = %error,
-                );
-                Err(error)
-            }
-            Err(CallError::ReadFailed { http_status, error }) => {
-                warn!(
-                    event = "attempt_failed",
-                    attempt,
-                    upstream = %id,
-                    duration_ms = elapsed_ms(attempt_start),
-                    http_status = http_status.as_u16(),
-                    error = %error,
-                );
-                Err(error)
-            }
-            Err(CallError::ErrorStatus { http_status }) => {
-                warn!(
-                    event = "attempt_failed",
-                    attempt,
-                    upstream = %id,
-                    duration_ms = elapsed_ms(attempt_start),
-                    http_status = http_status.as_u16(),
-                    error = "upstream returned error status",
-                );
-                Err(format!(
-                    "upstream returned error status {}",
-                    http_status.as_u16()
-                ))
+            Err(failure) => {
+                match &failure {
+                    CallError::Unreachable { error } => warn!(
+                        event = "attempt_failed",
+                        attempt,
+                        upstream = %id,
+                        duration_ms = duration,
+                        error = %error,
+                    ),
+                    CallError::ReadFailed { http_status, error } => warn!(
+                        event = "attempt_failed",
+                        attempt,
+                        upstream = %id,
+                        duration_ms = duration,
+                        http_status = http_status.as_u16(),
+                        error = %error,
+                    ),
+                    CallError::ErrorStatus { http_status } => warn!(
+                        event = "attempt_failed",
+                        attempt,
+                        upstream = %id,
+                        duration_ms = duration,
+                        http_status = http_status.as_u16(),
+                        error = "upstream returned error status",
+                    ),
+                }
+                Err(failure)
             }
         }
     }
