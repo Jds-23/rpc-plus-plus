@@ -1,8 +1,9 @@
 use std::{fmt, sync::Arc, time::Duration};
 
-use anyhow::{Context, Result};
 use axum::body::Bytes;
 use reqwest::{StatusCode, header};
+
+const DEFAULT_RPC_TIMEOUT_IN_SECS: u64 = 3;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct UpstreamId(Arc<str>);
@@ -41,6 +42,22 @@ impl fmt::Debug for Upstream {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum UpstreamBuildError {
+    #[error("no label was provided")]
+    NoLabel,
+    #[error("label must not be empty")]
+    EmptyLabel,
+    #[error("no url was provided")]
+    NoUrl,
+    #[error("url must not be empty")]
+    EmptyUrl,
+    #[error("rpc_timeout_in_secs must be at least 1")]
+    ZeroRpcTimeout,
+    #[error("failed to build HTTP client: {0}")]
+    HttpClient(#[from] reqwest::Error),
+}
+
 #[derive(Default)]
 pub struct UpstreamBuilder {
     label: Option<String>,
@@ -49,17 +66,13 @@ pub struct UpstreamBuilder {
 }
 
 impl UpstreamBuilder {
-    pub fn new() -> Self {
-        UpstreamBuilder::default()
-    }
-
-    pub fn with_label(mut self, label: String) -> Self {
-        self.label = Some(label);
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
         self
     }
 
-    pub fn with_url(mut self, url_string: String) -> Self {
-        self.url = Some(url_string);
+    pub fn with_url(mut self, url: impl Into<String>) -> Self {
+        self.url = Some(url.into());
         self
     }
 
@@ -68,19 +81,33 @@ impl UpstreamBuilder {
         self
     }
 
-    pub fn build(self) -> Result<Upstream> {
-        let url = self.url.context("url is not set")?;
-        let id = UpstreamId::new(self.label.context("label is not set")?);
+    pub fn build(self) -> Result<Upstream, UpstreamBuildError> {
+        let label = self.label.ok_or(UpstreamBuildError::NoLabel)?;
+        if label.trim().is_empty() {
+            return Err(UpstreamBuildError::EmptyLabel);
+        }
+
+        let url = self.url.ok_or(UpstreamBuildError::NoUrl)?;
+        if url.trim().is_empty() {
+            return Err(UpstreamBuildError::EmptyUrl);
+        }
+
         let rpc_timeout_in_secs = self
             .rpc_timeout_in_secs
-            .context("rpc_timeout_in_secs is not set")?;
+            .unwrap_or(DEFAULT_RPC_TIMEOUT_IN_SECS);
+        if rpc_timeout_in_secs == 0 {
+            return Err(UpstreamBuildError::ZeroRpcTimeout);
+        }
 
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(rpc_timeout_in_secs))
-            .build()
-            .context("failed to build HTTP client")?;
+            .build()?;
 
-        Ok(Upstream { http, url, id })
+        Ok(Upstream {
+            http,
+            url,
+            id: UpstreamId::new(label),
+        })
     }
 }
 
@@ -157,4 +184,58 @@ fn error_chain(err: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn builder() -> UpstreamBuilder {
+        UpstreamBuilder::default()
+            .with_label("one")
+            .with_url("http://127.0.0.1:8545")
+    }
+
+    #[test]
+    fn label_is_required_and_non_empty() {
+        let missing = UpstreamBuilder::default()
+            .with_url("http://127.0.0.1:8545")
+            .build();
+        assert!(matches!(missing, Err(UpstreamBuildError::NoLabel)));
+
+        let blank = builder().with_label("   ").build();
+        assert!(matches!(blank, Err(UpstreamBuildError::EmptyLabel)));
+    }
+
+    #[test]
+    fn url_is_required_and_non_empty() {
+        let missing = UpstreamBuilder::default().with_label("one").build();
+        assert!(matches!(missing, Err(UpstreamBuildError::NoUrl)));
+
+        let blank = builder().with_url("").build();
+        assert!(matches!(blank, Err(UpstreamBuildError::EmptyUrl)));
+    }
+
+    #[test]
+    fn zero_rpc_timeout_is_rejected() {
+        let built = builder().with_rpc_timeout_in_secs(0).build();
+        assert!(matches!(built, Err(UpstreamBuildError::ZeroRpcTimeout)));
+    }
+
+    /// An omitted timeout falls back to `DEFAULT_RPC_TIMEOUT_IN_SECS` rather
+    /// than failing, mirroring how `ProxyStateBuilder` treats `max_attempt`.
+    #[test]
+    fn rpc_timeout_defaults_when_omitted() {
+        assert!(builder().build().is_ok());
+    }
+
+    #[test]
+    fn builds_with_every_field_set() {
+        let upstream = builder()
+            .with_rpc_timeout_in_secs(1)
+            .build()
+            .expect("upstream build failed");
+
+        assert_eq!(upstream.id().as_str(), "one");
+    }
 }

@@ -23,7 +23,7 @@ impl Decider for RoundRobin {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RoundRobinBuildError {
-    #[error("upstreams is empty")]
+    #[error("upstreams must not be empty")]
     EmptyUpstreams,
 }
 
