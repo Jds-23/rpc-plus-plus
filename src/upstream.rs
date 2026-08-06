@@ -4,27 +4,27 @@ use anyhow::{Context, Result};
 use axum::body::Bytes;
 use reqwest::{StatusCode, header};
 
-pub struct RpcHandler {
+pub struct Upstream {
     http: reqwest::Client,
     url: String,
     label: String,
 }
 
-impl Debug for RpcHandler {
+impl Debug for Upstream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.label)
     }
 }
 #[derive(Default)]
-pub struct RpcHandlerBuilder {
+pub struct UpstreamBuilder {
     label: Option<String>,
     url: Option<String>,
     rpc_timeout_in_secs: Option<u64>,
 }
 
-impl RpcHandlerBuilder {
+impl UpstreamBuilder {
     pub fn new() -> Self {
-        RpcHandlerBuilder::default()
+        UpstreamBuilder::default()
     }
 
     pub fn with_label(mut self, label: String) -> Self {
@@ -42,7 +42,7 @@ impl RpcHandlerBuilder {
         self
     }
 
-    pub fn build(self) -> Result<RpcHandler> {
+    pub fn build(self) -> Result<Upstream> {
         let url = self.url.context("url is not set")?;
         let label = self.label.context("label is not set")?;
         let rpc_timeout_in_secs = self
@@ -54,17 +54,17 @@ impl RpcHandlerBuilder {
             .build()
             .context("failed to build HTTP client")?;
 
-        Ok(RpcHandler { http, url, label })
+        Ok(Upstream { http, url, label })
     }
 }
 
 // #[derive(Debug, Clone)]
-pub struct AttemptResult {
+pub struct CallOutcome {
     pub http_status: StatusCode,
     pub response_body: Bytes,
 }
 
-pub enum AttemptError {
+pub enum CallError {
     Unreachable {
         error: String,
     },
@@ -77,12 +77,12 @@ pub enum AttemptError {
     },
 }
 
-impl RpcHandler {
+impl Upstream {
     pub fn label(&self) -> &str {
         &self.label
     }
 
-    pub async fn proxy(&self, body: &Bytes) -> Result<reqwest::Response, reqwest::Error> {
+    async fn send(&self, body: &Bytes) -> Result<reqwest::Response, reqwest::Error> {
         self.http
             .post(&self.url)
             .header(header::CONTENT_TYPE, "application/json")
@@ -91,24 +91,24 @@ impl RpcHandler {
             .await
     }
 
-    pub async fn attempt(&self, body: &Bytes) -> Result<AttemptResult, AttemptError> {
-        let res = self.proxy(body).await.map_err(|err| {
+    pub async fn call(&self, body: &Bytes) -> Result<CallOutcome, CallError> {
+        let res = self.send(body).await.map_err(|err| {
             let error = error_chain(&err.without_url());
-            AttemptError::Unreachable { error }
+            CallError::Unreachable { error }
         })?;
 
         let http_status = res.status();
 
         let body = res.bytes().await.map_err(|err| {
             let error = error_chain(&err.without_url());
-            AttemptError::ReadFailed { http_status, error }
+            CallError::ReadFailed { http_status, error }
         })?;
 
         if http_status != StatusCode::OK {
-            return Err(AttemptError::ErrorStatus { http_status });
+            return Err(CallError::ErrorStatus { http_status });
         }
 
-        Ok(AttemptResult {
+        Ok(CallOutcome {
             http_status,
             response_body: body,
         })

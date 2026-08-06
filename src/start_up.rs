@@ -8,23 +8,23 @@ use crate::{
     decider::round_robin::RoundRobin,
     proxy::ProxyStateBuilder,
     route,
-    rpc_handler::{RpcHandler, RpcHandlerBuilder},
     settings::{RpcSettings, Settings},
+    upstream::{Upstream, UpstreamBuilder},
 };
 
-pub fn build_handlers<I>(rpcs: I, rpc_timeout_in_secs: u64) -> Vec<RpcHandler>
+pub fn build_upstreams<I>(rpcs: I, rpc_timeout_in_secs: u64) -> Vec<Upstream>
 where
     I: IntoIterator<Item = RpcSettings>,
 {
     rpcs.into_iter()
         .filter_map(|item| {
-            match RpcHandlerBuilder::default()
+            match UpstreamBuilder::default()
                 .with_label(item.label.clone())
                 .with_rpc_timeout_in_secs(rpc_timeout_in_secs)
                 .with_url(item.rpc_url)
                 .build()
             {
-                Ok(item) => Some(item),
+                Ok(upstream) => Some(upstream),
                 Err(err) => {
                     tracing::warn!(
                         event = "upstream_skipped",
@@ -42,10 +42,10 @@ where
 /// actually listening, and so the upstream count never has to escape to `main`
 /// just to be logged. `main` is left with nothing but the serve loop.
 pub async fn start(settings: Settings) -> Result<(TcpListener, Router)> {
-    let handlers = build_handlers(settings.rpcs, settings.rpc_timeout_in_secs);
-    let upstreams = handlers.len();
+    let upstreams = build_upstreams(settings.rpcs, settings.rpc_timeout_in_secs);
+    let upstream_count = upstreams.len();
 
-    let decider = Arc::new(RoundRobin::new(handlers).context("failed to build decider")?);
+    let decider = Arc::new(RoundRobin::new(upstreams).context("failed to build decider")?);
 
     let state = ProxyStateBuilder::default()
         .with_max_attempt(settings.max_attempt)
@@ -63,7 +63,7 @@ pub async fn start(settings: Settings) -> Result<(TcpListener, Router)> {
 
     tracing::info!(
         event = "startup_ready",
-        upstreams,
+        upstreams = upstream_count,
         port = settings.application_port,
     );
 

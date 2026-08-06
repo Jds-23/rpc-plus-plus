@@ -40,7 +40,7 @@ Two sanctioned overrides — swap the emoji, keep the type:
 
 ## Scopes
 
-From `src/`: `rpc`, `route`, `decider`, `settings`, `telemetry`, `handler`, `healthz`, `startup`.
+From `src/`: `rpc`, `route`, `decider`, `settings`, `telemetry`, `handler`, `healthz`, `startup`, `upstream`.
 Plus `tests`, `docs`, `deps`.
 
 ## Before / after

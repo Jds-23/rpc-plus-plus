@@ -3,40 +3,40 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use crate::{decider::Decider, rpc_handler::RpcHandler};
+use crate::{decider::Decider, upstream::Upstream};
 
 pub struct RoundRobin {
-    items: Vec<Arc<RpcHandler>>,
+    upstreams: Vec<Arc<Upstream>>,
     next: AtomicUsize,
 }
 
 impl Decider for RoundRobin {
-    fn decide(&self, max: usize) -> Vec<Arc<RpcHandler>> {
-        if self.items.is_empty() || max == 0 {
+    fn decide(&self, max: usize) -> Vec<Arc<Upstream>> {
+        if self.upstreams.is_empty() || max == 0 {
             return Vec::new();
         }
-        let start = self.next.fetch_add(1, Ordering::Relaxed) % self.items.len();
-        let (head, tail) = self.items.split_at(start);
+        let start = self.next.fetch_add(1, Ordering::Relaxed) % self.upstreams.len();
+        let (head, tail) = self.upstreams.split_at(start);
         tail.iter().chain(head).take(max).cloned().collect()
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum RoundRobinBuildError {
-    #[error("handlers is empty")]
-    EmptyHandlers,
+    #[error("upstreams is empty")]
+    EmptyUpstreams,
 }
 
 impl RoundRobin {
     pub fn new(
-        handlers: impl IntoIterator<Item = RpcHandler>,
+        upstreams: impl IntoIterator<Item = Upstream>,
     ) -> Result<Self, RoundRobinBuildError> {
-        let handlers: Vec<Arc<RpcHandler>> = handlers.into_iter().map(Arc::new).collect();
-        if handlers.is_empty() {
-            return Err(RoundRobinBuildError::EmptyHandlers);
+        let upstreams: Vec<Arc<Upstream>> = upstreams.into_iter().map(Arc::new).collect();
+        if upstreams.is_empty() {
+            return Err(RoundRobinBuildError::EmptyUpstreams);
         }
         Ok(RoundRobin {
-            items: handlers,
+            upstreams,
             next: AtomicUsize::new(0),
         })
     }

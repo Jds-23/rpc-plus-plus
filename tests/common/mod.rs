@@ -3,14 +3,14 @@ use std::sync::Arc;
 
 use rpc_plus_plus::{
     decider::round_robin::RoundRobin, proxy::ProxyState, route::build_router,
-    settings::RpcSettings, start_up::build_handlers,
+    settings::RpcSettings, start_up::build_upstreams,
 };
 
 /// Builds the rotation the proxy decides over. Every test drives the same
-/// construction path as `main`: settings -> handlers -> decider.
-pub fn round_robin(upstreams: Vec<RpcSettings>) -> Arc<RoundRobin> {
-    let handlers = build_handlers(upstreams, 1);
-    Arc::new(RoundRobin::new(handlers).expect("decider build failed"))
+/// construction path as `main`: settings -> upstreams -> decider.
+pub fn round_robin(rpcs: Vec<RpcSettings>) -> Arc<RoundRobin> {
+    let upstreams = build_upstreams(rpcs, 1);
+    Arc::new(RoundRobin::new(upstreams).expect("decider build failed"))
 }
 
 pub async fn spawn_app(state: Arc<ProxyState>) -> String {

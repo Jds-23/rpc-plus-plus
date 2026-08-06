@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     decider::Decider,
     observer::Observer,
-    rpc_handler::{AttemptError, AttemptResult, RpcHandler},
+    upstream::{CallError, CallOutcome, Upstream},
 };
 
 const DEFAULT_MAX_ATTEMPT: u64 = 3;
@@ -104,8 +104,8 @@ impl ProxyState {
             return StatusCode::BAD_REQUEST.into_response();
         }
 
-        let handler_chain = self.decider.decide(self.max_attempt);
-        let mut tried: Vec<&str> = Vec::with_capacity(handler_chain.len());
+        let chain = self.decider.decide(self.max_attempt);
+        let mut tried: Vec<&str> = Vec::with_capacity(chain.len());
 
         // An empty chain skips the loop and falls through to `retries_exhausted`
         // with zero attempts, rather than inventing an event name outside the
@@ -113,28 +113,28 @@ impl ProxyState {
         // `max_attempt == 0` and `RoundRobin::new` rejects an empty rotation — but
         // a health-scored `Decider` legitimately can once every upstream is
         // scored out.
-        let mut last_failure = if handler_chain.is_empty() {
+        let mut last_failure = if chain.is_empty() {
             "no upstream available".to_string()
         } else {
             // "unreachable" unless a read is what actually failed last
             "upstream unreachable".to_string()
         };
 
-        for handler in &handler_chain {
+        for upstream in &chain {
             if tried.len() >= self.max_attempt {
                 break;
             }
             if !tried.is_empty() {
                 tokio::time::sleep(self.retry_after).await;
             }
-            tried.push(handler.label());
+            tried.push(upstream.label());
 
-            match Self::try_once(handler, &body, tried.len() as u64).await {
+            match Self::try_once(upstream, &body, tried.len() as u64).await {
                 Ok(response) => {
                     info!(
                         event = "request_completed",
                         attempts = tried.len(),
-                        upstream = %handler.label(),
+                        upstream = %upstream.label(),
                         duration_ms = elapsed_ms(received_at),
                     );
                     return response;
@@ -153,22 +153,18 @@ impl ProxyState {
         rpc_error(-32603, &last_failure)
     }
 
-    async fn try_once(
-        handler: &RpcHandler,
-        body: &Bytes,
-        attempt: u64,
-    ) -> Result<Response, String> {
+    async fn try_once(upstream: &Upstream, body: &Bytes, attempt: u64) -> Result<Response, String> {
         let attempt_start = Instant::now();
-        let upstream = handler.label();
-        match handler.attempt(body).await {
-            Ok(AttemptResult {
+        let label = upstream.label();
+        match upstream.call(body).await {
+            Ok(CallOutcome {
                 http_status,
                 response_body,
             }) => {
                 info!(
                     event = "attempt_succeeded",
                     attempt,
-                    upstream = %upstream,
+                    upstream = %label,
                     duration_ms = elapsed_ms(attempt_start),
                     http_status = http_status.as_u16(),
                     response_bytes = response_body.len(),
@@ -180,32 +176,32 @@ impl ProxyState {
                 )
                     .into_response())
             }
-            Err(AttemptError::Unreachable { error }) => {
+            Err(CallError::Unreachable { error }) => {
                 warn!(
                     event = "attempt_failed",
                     attempt,
-                    upstream = %upstream,
+                    upstream = %label,
                     duration_ms = elapsed_ms(attempt_start),
                     error = %error,
                 );
                 Err(error)
             }
-            Err(AttemptError::ReadFailed { http_status, error }) => {
+            Err(CallError::ReadFailed { http_status, error }) => {
                 warn!(
                     event = "attempt_failed",
                     attempt,
-                    upstream = %upstream,
+                    upstream = %label,
                     duration_ms = elapsed_ms(attempt_start),
                     http_status = http_status.as_u16(),
                     error = %error,
                 );
                 Err(error)
             }
-            Err(AttemptError::ErrorStatus { http_status }) => {
+            Err(CallError::ErrorStatus { http_status }) => {
                 warn!(
                     event = "attempt_failed",
                     attempt,
-                    upstream = %upstream,
+                    upstream = %label,
                     duration_ms = elapsed_ms(attempt_start),
                     http_status = http_status.as_u16(),
                     error = "upstream returned error status",

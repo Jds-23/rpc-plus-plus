@@ -5,18 +5,18 @@ use http_body_util::BodyExt;
 use reqwest::StatusCode;
 use rpc_plus_plus::{
     decider::round_robin::RoundRobin, proxy::ProxyStateBuilder, route, settings::RpcSettings,
-    start_up::build_handlers,
+    start_up::build_upstreams,
 };
 use tower::ServiceExt;
 
 #[tokio::test]
 async fn healthz_returns_ok() {
-    let upstream = vec![RpcSettings {
+    let rpcs = vec![RpcSettings {
         label: "fake".to_string(),
         rpc_url: "http://127.0.0.1:1/".to_string(),
     }];
-    let rcp_handlers = build_handlers(upstream, 1);
-    let decider = Arc::new(RoundRobin::new(rcp_handlers).expect("decider build failed"));
+    let upstreams = build_upstreams(rpcs, 1);
+    let decider = Arc::new(RoundRobin::new(upstreams).expect("decider build failed"));
 
     let state = ProxyStateBuilder::default()
         .with_decider(decider)
