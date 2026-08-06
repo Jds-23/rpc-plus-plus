@@ -109,11 +109,6 @@ impl Upstream {
         &self.id
     }
 
-    /// The same string, for log lines that want it rendered rather than keyed.
-    pub fn label(&self) -> &str {
-        self.id.as_str()
-    }
-
     async fn send(&self, body: &Bytes) -> Result<reqwest::Response, reqwest::Error> {
         self.http
             .post(&self.url)

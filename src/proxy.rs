@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     decider::Decider,
     observer::Observer,
-    upstream::{CallError, CallOutcome, Upstream},
+    upstream::{CallError, CallOutcome, Upstream, UpstreamId},
 };
 
 const DEFAULT_MAX_ATTEMPT: u64 = 3;
@@ -105,7 +105,7 @@ impl ProxyState {
         }
 
         let chain = self.decider.decide(self.max_attempt);
-        let mut tried: Vec<&str> = Vec::with_capacity(chain.len());
+        let mut tried: Vec<&UpstreamId> = Vec::with_capacity(chain.len());
 
         // An empty chain skips the loop and falls through to `retries_exhausted`
         // with zero attempts, rather than inventing an event name outside the
@@ -127,14 +127,14 @@ impl ProxyState {
             if !tried.is_empty() {
                 tokio::time::sleep(self.retry_after).await;
             }
-            tried.push(upstream.label());
+            tried.push(upstream.id());
 
             match Self::try_once(upstream, &body, tried.len() as u64).await {
                 Ok(response) => {
                     info!(
                         event = "request_completed",
                         attempts = tried.len(),
-                        upstream = %upstream.label(),
+                        upstream = %upstream.id(),
                         duration_ms = elapsed_ms(received_at),
                     );
                     return response;
@@ -155,7 +155,7 @@ impl ProxyState {
 
     async fn try_once(upstream: &Upstream, body: &Bytes, attempt: u64) -> Result<Response, String> {
         let attempt_start = Instant::now();
-        let label = upstream.label();
+        let id = upstream.id();
         match upstream.call(body).await {
             Ok(CallOutcome {
                 http_status,
@@ -164,7 +164,7 @@ impl ProxyState {
                 info!(
                     event = "attempt_succeeded",
                     attempt,
-                    upstream = %label,
+                    upstream = %id,
                     duration_ms = elapsed_ms(attempt_start),
                     http_status = http_status.as_u16(),
                     response_bytes = response_body.len(),
@@ -180,7 +180,7 @@ impl ProxyState {
                 warn!(
                     event = "attempt_failed",
                     attempt,
-                    upstream = %label,
+                    upstream = %id,
                     duration_ms = elapsed_ms(attempt_start),
                     error = %error,
                 );
@@ -190,7 +190,7 @@ impl ProxyState {
                 warn!(
                     event = "attempt_failed",
                     attempt,
-                    upstream = %label,
+                    upstream = %id,
                     duration_ms = elapsed_ms(attempt_start),
                     http_status = http_status.as_u16(),
                     error = %error,
@@ -201,7 +201,7 @@ impl ProxyState {
                 warn!(
                     event = "attempt_failed",
                     attempt,
-                    upstream = %label,
+                    upstream = %id,
                     duration_ms = elapsed_ms(attempt_start),
                     http_status = http_status.as_u16(),
                     error = "upstream returned error status",
