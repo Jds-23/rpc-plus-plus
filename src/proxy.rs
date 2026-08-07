@@ -50,9 +50,12 @@ impl ProxyStateBuilder {
         }
     }
 
-    pub fn with_max_attempt(mut self, count: u64) -> Self {
+    pub fn with_max_attempt(mut self, count: u64) -> Result<Self, ProxyStateBuildError> {
+        if count == 0 {
+            return Err(ProxyStateBuildError::ZeroMaxAttempt);
+        }
         self.max_attempt = Some(count);
-        self
+        Ok(self)
     }
 
     pub fn with_retry_after(mut self, after: Duration) -> Self {
@@ -64,18 +67,14 @@ impl ProxyStateBuilder {
         self.with_retry_after(Duration::from_secs(secs))
     }
 
-    pub fn build(self) -> Result<ProxyState, ProxyStateBuildError> {
+    pub fn build(self) -> ProxyState {
         let max_attempt = self.max_attempt.unwrap_or(DEFAULT_MAX_ATTEMPT);
-        if max_attempt == 0 {
-            return Err(ProxyStateBuildError::ZeroMaxAttempt);
-        }
-
-        Ok(ProxyState {
+        ProxyState {
             decider: self.decider,
             observer: self.observer,
             max_attempt: max_attempt as usize,
             retry_after: self.retry_after.unwrap_or(DEFAULT_RETRY_AFTER),
-        })
+        }
     }
 }
 

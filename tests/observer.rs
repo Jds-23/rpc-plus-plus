@@ -65,9 +65,9 @@ fn state(rpcs: Vec<RpcSettings>, observer: Arc<RecordingObserver>) -> Arc<ProxyS
     let max_attempt = rpcs.len() as u64;
     let state = ProxyStateBuilder::new(round_robin(rpcs), observer)
         .with_max_attempt(max_attempt)
+        .unwrap()
         .with_retry_after(Duration::ZERO)
-        .build()
-        .expect("state build failed");
+        .build();
     Arc::new(state)
 }
 

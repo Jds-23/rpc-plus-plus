@@ -50,10 +50,9 @@ pub async fn start(settings: Settings) -> Result<(TcpListener, Router)> {
     let observer = Arc::new(NoopObserver::new());
 
     let state = ProxyStateBuilder::new(decider, observer)
-        .with_max_attempt(settings.max_attempt)
+        .with_max_attempt(settings.max_attempt)?
         .with_retry_after_in_secs(settings.retry_after_in_secs)
-        .build()
-        .context("failed to build proxy state")?;
+        .build();
 
     let app = route::build_router(Arc::new(state));
 

@@ -19,9 +19,7 @@ async fn healthz_returns_ok() {
     let decider = Arc::new(RoundRobin::new(upstreams).expect("decider build failed"));
     let observer = Arc::new(NoopObserver::new());
 
-    let state = ProxyStateBuilder::new(decider, observer)
-        .build()
-        .expect("State build failed");
+    let state = ProxyStateBuilder::new(decider, observer).build();
     let app = route::build_router(Arc::new(state));
 
     let res = app
