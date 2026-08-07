@@ -1388,6 +1388,7 @@ dependencies = [
  "axum",
  "config",
  "http-body-util",
+ "mime",
  "reqwest",
  "serde",
  "serde_json",

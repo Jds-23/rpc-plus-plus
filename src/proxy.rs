@@ -177,7 +177,7 @@ impl ProxyState {
                 );
                 Ok((
                     http_status,
-                    [(header::CONTENT_TYPE, "application/json")],
+                    [(header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())],
                     response_body,
                 )
                     .into_response())

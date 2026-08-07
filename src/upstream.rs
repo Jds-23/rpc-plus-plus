@@ -177,7 +177,7 @@ impl Upstream {
     async fn send(&self, body: &Bytes) -> Result<reqwest::Response, reqwest::Error> {
         self.http
             .post(&self.url)
-            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
             .body(body.to_owned())
             .send()
             .await
