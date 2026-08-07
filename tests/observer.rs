@@ -63,9 +63,7 @@ fn rpc(label: &str, rpc_url: impl Into<String>) -> RpcSettings {
 /// `retry_after` is zeroed so the loop does not sleep between attempts.
 fn state(rpcs: Vec<RpcSettings>, observer: Arc<RecordingObserver>) -> Arc<ProxyState> {
     let max_attempt = rpcs.len() as u64;
-    let state = ProxyStateBuilder::default()
-        .with_decider(round_robin(rpcs))
-        .with_observer(observer)
+    let state = ProxyStateBuilder::new(round_robin(rpcs), observer)
         .with_max_attempt(max_attempt)
         .with_retry_after(Duration::ZERO)
         .build()

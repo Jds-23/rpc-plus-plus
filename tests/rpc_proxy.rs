@@ -17,9 +17,7 @@ async fn proxies_reponse_from_upstream() {
     }];
     let observer = Arc::new(NoopObserver::new());
 
-    let state = ProxyStateBuilder::default()
-        .with_decider(round_robin(upstreams))
-        .with_observer(observer)
+    let state = ProxyStateBuilder::new(round_robin(upstreams), observer)
         .build()
         .expect("State build failed");
     let addr = spawn_app(Arc::new(state)).await;
@@ -49,9 +47,7 @@ async fn round_robin_distributes_evenly() {
             rpc_url: b.uri(),
         },
     ];
-    let state = ProxyStateBuilder::default()
-        .with_decider(round_robin(upstreams))
-        .with_observer(Arc::new(NoopObserver::new()))
+    let state = ProxyStateBuilder::new(round_robin(upstreams), Arc::new(NoopObserver::new()))
         .build()
         .expect("State build failed");
     let addr = spawn_app(Arc::new(state)).await;
@@ -92,9 +88,7 @@ async fn works_fine_when_one_uptream_works() {
             rpc_url: b.uri(),
         },
     ];
-    let state = ProxyStateBuilder::default()
-        .with_decider(round_robin(upstreams))
-        .with_observer(Arc::new(NoopObserver::new()))
+    let state = ProxyStateBuilder::new(round_robin(upstreams), Arc::new(NoopObserver::new()))
         .with_retry_after_in_secs(0)
         .build()
         .expect("State build failed");
@@ -134,9 +128,7 @@ async fn non_works_fine_retry_and_propagate_last_error() {
             rpc_url: b.uri(),
         },
     ];
-    let state = ProxyStateBuilder::default()
-        .with_decider(round_robin(upstreams))
-        .with_observer(Arc::new(NoopObserver::new()))
+    let state = ProxyStateBuilder::new(round_robin(upstreams), Arc::new(NoopObserver::new()))
         .with_max_attempt(2)
         .with_retry_after_in_secs(0)
         .build()
@@ -172,9 +164,7 @@ async fn single_upstream_is_tried_once() {
         label: "one".to_string(),
         rpc_url: a.uri(),
     }];
-    let state = ProxyStateBuilder::default()
-        .with_decider(round_robin(upstreams))
-        .with_observer(Arc::new(NoopObserver::new()))
+    let state = ProxyStateBuilder::new(round_robin(upstreams), Arc::new(NoopObserver::new()))
         .with_max_attempt(3)
         .with_retry_after_in_secs(3)
         .build()

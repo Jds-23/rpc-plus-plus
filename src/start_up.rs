@@ -49,11 +49,9 @@ pub async fn start(settings: Settings) -> Result<(TcpListener, Router)> {
     let decider = Arc::new(RoundRobin::new(upstreams).context("failed to build decider")?);
     let observer = Arc::new(NoopObserver::new());
 
-    let state = ProxyStateBuilder::default()
+    let state = ProxyStateBuilder::new(decider, observer)
         .with_max_attempt(settings.max_attempt)
         .with_retry_after_in_secs(settings.retry_after_in_secs)
-        .with_decider(decider)
-        .with_observer(observer)
         .build()
         .context("failed to build proxy state")?;
 
