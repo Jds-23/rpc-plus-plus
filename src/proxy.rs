@@ -154,9 +154,13 @@ impl ProxyState {
         attempt: u64,
     ) -> Result<Response, CallError> {
         let id = upstream.id();
+        info!(
+            event = "attempt_started",
+            attempt,
+            upstream = %id,
+        );
         let call = upstream.call(body).await;
         self.observer.record(id, call.record());
-
         let duration = call.duration.as_millis() as u64;
         match call.result {
             Ok(CallOutcome {
