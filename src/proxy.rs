@@ -19,6 +19,7 @@ use crate::{
 
 const DEFAULT_MAX_ATTEMPT: u64 = 3;
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
+const JSONRPC_INTERNAL_ERROR: i64 = -32603;
 
 pub struct ProxyState {
     observer: Arc<dyn Observer>,
@@ -134,7 +135,7 @@ impl ProxyState {
             duration_ms = elapsed_ms(received_at),
             error = %error,
         );
-        rpc_error(-32603, &error)
+        rpc_error(JSONRPC_INTERNAL_ERROR, &error)
     }
 
     async fn try_once(
@@ -237,13 +238,13 @@ mod tests {
     #[tokio::test]
     async fn rpc_error_escapes_the_message() {
         let msg = "upstream said \"nope\"\nand hung up";
-        let response = rpc_error(-32603, msg);
+        let response = rpc_error(JSONRPC_INTERNAL_ERROR, msg);
 
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(parsed["error"]["message"], msg);
-        assert_eq!(parsed["error"]["code"], -32603);
+        assert_eq!(parsed["error"]["code"], JSONRPC_INTERNAL_ERROR);
         assert!(parsed["id"].is_null());
     }
 }
