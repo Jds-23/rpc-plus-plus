@@ -1,32 +1,27 @@
 use std::sync::Arc;
 
-use axum::{body::Body, http::Request};
-use http_body_util::BodyExt;
 use reqwest::StatusCode;
-use rpc_plus_plus::{
-    decider::round_robin::RoundRobin, observer::NoopObserver, proxy::ProxyStateBuilder, route,
-    settings::RpcSettings, start_up::build_upstreams,
-};
-use tower::ServiceExt;
+use rpc_plus_plus::observer::NoopObserver;
+
+use crate::common::{rpc, spawn_app, test_settings};
+
+mod common;
+
+/// Nothing listens here: `/healthz` reports that the process is up, not that any
+/// upstream is reachable.
+const DEAD_URL: &str = "http://127.0.0.1:1/";
 
 #[tokio::test]
 async fn healthz_returns_ok() {
-    let rpcs = vec![RpcSettings {
-        label: "fake".to_string(),
-        rpc_url: "http://127.0.0.1:1/".to_string(),
-    }];
-    let upstreams = build_upstreams(rpcs, 1);
-    let decider = Arc::new(RoundRobin::new(upstreams).expect("decider build failed"));
-    let observer = Arc::new(NoopObserver::new());
+    let settings = test_settings(vec![rpc("fake", DEAD_URL)]);
+    let addr = spawn_app(settings, Arc::new(NoopObserver::new())).await;
 
-    let state = ProxyStateBuilder::new(decider, observer).build();
-    let app = route::build_router(Arc::new(state));
-
-    let res = app
-        .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+    let res = reqwest::Client::new()
+        .get(format!("{addr}/healthz"))
+        .send()
         .await
         .unwrap();
+
     assert_eq!(res.status(), StatusCode::OK);
-    let body = res.into_body().collect().await.unwrap().to_bytes();
-    assert!(!body.is_empty());
+    assert!(!res.bytes().await.unwrap().is_empty());
 }

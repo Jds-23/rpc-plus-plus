@@ -28,24 +28,24 @@ impl Application {
 
         let decider = Arc::new(RoundRobin::new(upstreams).context("failed to build decider")?);
 
-        let state = ProxyStateBuilder::default()
-            .with_max_attempt(settings.max_attempt)
+        let state = ProxyStateBuilder::new(decider, observer)
+            .with_max_attempt(settings.max_attempt)?
             .with_retry_after_in_secs(settings.retry_after_in_secs)
-            .with_decider(decider)
-            .with_observer(observer)
-            .build()
-            .context("failed to build proxy state")?;
+            .build();
 
         let router = route::build_router(Arc::new(state));
+
         let addr = format!("127.0.0.1:{}", settings.application_port);
         let listener = TcpListener::bind(&addr)
             .await
             .with_context(|| format!("failed to bind {addr}"))?;
+
         let port = listener
             .local_addr()
             .context("failed to read the bound address")?
             .port();
-        tracing::info!(event = "startup_ready", upstreams = upstream_count, port,);
+
+        tracing::info!(event = "startup_ready", upstreams = upstream_count, port);
 
         Ok(Application {
             listener,
@@ -54,9 +54,11 @@ impl Application {
             tasks: JoinSet::new(),
         })
     }
+
     pub fn port(&self) -> u16 {
         self.port
     }
+
     pub async fn run_until_stopped(mut self, shutdown: CancellationToken) -> Result<()> {
         let served = axum::serve(self.listener, self.router)
             .with_graceful_shutdown(shutdown.clone().cancelled_owned())
@@ -70,7 +72,7 @@ impl Application {
     }
 }
 
-pub fn build_upstreams<I>(rpcs: I, rpc_timeout_in_secs: u64) -> Vec<Upstream>
+fn build_upstreams<I>(rpcs: I, rpc_timeout_in_secs: u64) -> Vec<Upstream>
 where
     I: IntoIterator<Item = RpcSettings>,
 {

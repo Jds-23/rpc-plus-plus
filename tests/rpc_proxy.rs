@@ -1,24 +1,18 @@
 use std::{sync::Arc, time::Instant};
 
 use reqwest::StatusCode;
-use rpc_plus_plus::{observer::NoopObserver, proxy::ProxyStateBuilder, settings::RpcSettings};
+use rpc_plus_plus::observer::NoopObserver;
 use serde_json::json;
 
-use crate::common::{mock_rpc_server, round_robin, spawn_app};
+use crate::common::{mock_rpc_server, rpc, spawn_app, test_settings};
 
 mod common;
 
 #[tokio::test]
 async fn proxies_reponse_from_upstream() {
     let mock_rpc_server = mock_rpc_server::ok("0x1").await;
-    let upstreams: Vec<RpcSettings> = vec![RpcSettings {
-        label: "one".to_string(),
-        rpc_url: mock_rpc_server.uri(),
-    }];
-    let observer = Arc::new(NoopObserver::new());
-
-    let state = ProxyStateBuilder::new(round_robin(upstreams), observer).build();
-    let addr = spawn_app(Arc::new(state)).await;
+    let settings = test_settings(vec![rpc("one", mock_rpc_server.uri())]);
+    let addr = spawn_app(settings, Arc::new(NoopObserver::new())).await;
 
     let res = reqwest::Client::new()
         .post(format!("{addr}/rpc"))
@@ -35,19 +29,8 @@ async fn proxies_reponse_from_upstream() {
 async fn round_robin_distributes_evenly() {
     let a = mock_rpc_server::ok("0xa").await;
     let b = mock_rpc_server::ok("0xb").await;
-    let upstreams: Vec<RpcSettings> = vec![
-        RpcSettings {
-            label: "one".to_string(),
-            rpc_url: a.uri(),
-        },
-        RpcSettings {
-            label: "two".to_string(),
-            rpc_url: b.uri(),
-        },
-    ];
-    let state =
-        ProxyStateBuilder::new(round_robin(upstreams), Arc::new(NoopObserver::new())).build();
-    let addr = spawn_app(Arc::new(state)).await;
+    let settings = test_settings(vec![rpc("one", a.uri()), rpc("two", b.uri())]);
+    let addr = spawn_app(settings, Arc::new(NoopObserver::new())).await;
 
     let client = reqwest::Client::new();
     for index in 0..4 {
@@ -75,20 +58,9 @@ async fn round_robin_distributes_evenly() {
 async fn works_fine_when_one_uptream_works() {
     let a = mock_rpc_server::ok("0xa").await;
     let b = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
-    let upstreams: Vec<RpcSettings> = vec![
-        RpcSettings {
-            label: "one".to_string(),
-            rpc_url: a.uri(),
-        },
-        RpcSettings {
-            label: "two".to_string(),
-            rpc_url: b.uri(),
-        },
-    ];
-    let state = ProxyStateBuilder::new(round_robin(upstreams), Arc::new(NoopObserver::new()))
-        .with_retry_after_in_secs(0)
-        .build();
-    let addr = spawn_app(Arc::new(state)).await;
+    let mut settings = test_settings(vec![rpc("one", a.uri()), rpc("two", b.uri())]);
+    settings.retry_after_in_secs = 0;
+    let addr = spawn_app(settings, Arc::new(NoopObserver::new())).await;
 
     let client = reqwest::Client::new();
     for _ in 0..4 {
@@ -114,22 +86,10 @@ async fn works_fine_when_one_uptream_works() {
 async fn non_works_fine_retry_and_propagate_last_error() {
     let a = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
     let b = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
-    let upstreams: Vec<RpcSettings> = vec![
-        RpcSettings {
-            label: "one".to_string(),
-            rpc_url: a.uri(),
-        },
-        RpcSettings {
-            label: "two".to_string(),
-            rpc_url: b.uri(),
-        },
-    ];
-    let state = ProxyStateBuilder::new(round_robin(upstreams), Arc::new(NoopObserver::new()))
-        .with_max_attempt(2)
-        .unwrap()
-        .with_retry_after_in_secs(0)
-        .build();
-    let addr = spawn_app(Arc::new(state)).await;
+    let mut settings = test_settings(vec![rpc("one", a.uri()), rpc("two", b.uri())]);
+    settings.max_attempt = 2;
+    settings.retry_after_in_secs = 0;
+    let addr = spawn_app(settings, Arc::new(NoopObserver::new())).await;
 
     let client = reqwest::Client::new();
     for _ in 0..4 {
@@ -156,16 +116,10 @@ async fn non_works_fine_retry_and_propagate_last_error() {
 #[tokio::test]
 async fn single_upstream_is_tried_once() {
     let a = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
-    let upstreams: Vec<RpcSettings> = vec![RpcSettings {
-        label: "one".to_string(),
-        rpc_url: a.uri(),
-    }];
-    let state = ProxyStateBuilder::new(round_robin(upstreams), Arc::new(NoopObserver::new()))
-        .with_max_attempt(3)
-        .unwrap()
-        .with_retry_after_in_secs(3)
-        .build();
-    let addr = spawn_app(Arc::new(state)).await;
+    let mut settings = test_settings(vec![rpc("one", a.uri())]);
+    settings.max_attempt = 3;
+    settings.retry_after_in_secs = 3;
+    let addr = spawn_app(settings, Arc::new(NoopObserver::new())).await;
 
     let started_at = Instant::now();
     let res = reqwest::Client::new()

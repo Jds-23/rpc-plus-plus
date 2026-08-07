@@ -6,13 +6,12 @@ use std::{
 use reqwest::StatusCode;
 use rpc_plus_plus::{
     observer::Observer,
-    proxy::{ProxyState, ProxyStateBuilder},
-    settings::RpcSettings,
+    settings::{RpcSettings, Settings},
     upstream::{CallRecord, UpstreamId},
 };
 use serde_json::json;
 
-use crate::common::{mock_rpc_server, round_robin, spawn_app};
+use crate::common::{mock_rpc_server, rpc, spawn_app, test_settings};
 
 mod common;
 
@@ -53,22 +52,13 @@ impl Observer for RecordingObserver {
 /// Nothing listens here, so the call fails before a response exists.
 const DEAD_URL: &str = "http://127.0.0.1:1";
 
-fn rpc(label: &str, rpc_url: impl Into<String>) -> RpcSettings {
-    RpcSettings {
-        label: label.to_string(),
-        rpc_url: rpc_url.into(),
-    }
-}
-
-/// `retry_after` is zeroed so the loop does not sleep between attempts.
-fn state(rpcs: Vec<RpcSettings>, observer: Arc<RecordingObserver>) -> Arc<ProxyState> {
-    let max_attempt = rpcs.len() as u64;
-    let state = ProxyStateBuilder::new(round_robin(rpcs), observer)
-        .with_max_attempt(max_attempt)
-        .unwrap()
-        .with_retry_after(Duration::ZERO)
-        .build();
-    Arc::new(state)
+/// Every upstream gets a turn, and `retry_after` is zeroed so the loop does not
+/// sleep between attempts.
+fn settings(rpcs: Vec<RpcSettings>) -> Settings {
+    let mut settings = test_settings(rpcs);
+    settings.max_attempt = settings.rpcs.len() as u64;
+    settings.retry_after_in_secs = 0;
+    settings
 }
 
 async fn post(addr: &str) -> reqwest::Response {
@@ -84,10 +74,10 @@ async fn post(addr: &str) -> reqwest::Response {
 async fn every_attempt_is_recorded_in_chain_order() {
     let live = mock_rpc_server::ok("0x1").await;
     let observer = Arc::new(RecordingObserver::default());
-    let addr = spawn_app(state(
-        vec![rpc("dead", DEAD_URL), rpc("live", live.uri())],
+    let addr = spawn_app(
+        settings(vec![rpc("dead", DEAD_URL), rpc("live", live.uri())]),
         observer.clone(),
-    ))
+    )
     .await;
 
     let res = post(&addr).await;
@@ -111,7 +101,7 @@ async fn every_attempt_is_recorded_in_chain_order() {
 async fn an_error_status_is_recorded_with_its_code() {
     let failing = mock_rpc_server::failing(StatusCode::INTERNAL_SERVER_ERROR).await;
     let observer = Arc::new(RecordingObserver::default());
-    let addr = spawn_app(state(vec![rpc("one", failing.uri())], observer.clone())).await;
+    let addr = spawn_app(settings(vec![rpc("one", failing.uri())]), observer.clone()).await;
 
     let body: serde_json::Value = post(&addr).await.json().await.unwrap();
     assert_eq!(
@@ -133,10 +123,10 @@ async fn an_error_status_is_recorded_with_its_code() {
 async fn the_recorded_duration_is_per_call() {
     let live = mock_rpc_server::ok("0x1").await;
     let observer = Arc::new(RecordingObserver::default());
-    let addr = spawn_app(state(
-        vec![rpc("dead", DEAD_URL), rpc("live", live.uri())],
+    let addr = spawn_app(
+        settings(vec![rpc("dead", DEAD_URL), rpc("live", live.uri())]),
         observer.clone(),
-    ))
+    )
     .await;
 
     let started = Instant::now();

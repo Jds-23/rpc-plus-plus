@@ -1,23 +1,66 @@
+// Each integration test binary compiles this module in full, so whatever a given
+// binary does not reach for reads as dead code. `healthz` needs no mock upstream;
+// only the shutdown test touches `TestApp`'s handles.
+#![allow(dead_code)]
+
 pub mod mock_rpc_server;
 use std::sync::Arc;
 
 use rpc_plus_plus::{
-    decider::round_robin::RoundRobin, proxy::ProxyState, route::build_router,
-    settings::RpcSettings, start_up::build_upstreams,
+    observer::Observer,
+    settings::{RpcSettings, Settings},
+    start_up::Application,
 };
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
-/// Builds the rotation the proxy decides over. Every test drives the same
-/// construction path as `main`: settings -> upstreams -> decider.
-pub fn round_robin(rpcs: Vec<RpcSettings>) -> Arc<RoundRobin> {
-    let upstreams = build_upstreams(rpcs, 1);
-    Arc::new(RoundRobin::new(upstreams).expect("decider build failed"))
+/// The defaults every test starts from, matching `settings.rs`'s own except for
+/// the port. Tests that care about a value overwrite the field.
+pub fn test_settings(rpcs: Vec<RpcSettings>) -> Settings {
+    Settings {
+        rpcs,
+        // The OS picks a free port, so tests can run in parallel. Read back
+        // through `Application::port`.
+        application_port: 0,
+        max_attempt: 3,
+        rpc_timeout_in_secs: 1,
+        retry_after_in_secs: 1,
+    }
 }
 
-pub async fn spawn_app(state: Arc<ProxyState>) -> String {
-    let app = build_router(state);
-    // port 0 => OS picks a free port, tests can run in parallel
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}")
+pub fn rpc(label: &str, rpc_url: impl Into<String>) -> RpcSettings {
+    RpcSettings {
+        label: label.to_string(),
+        rpc_url: rpc_url.into(),
+    }
+}
+
+/// A running proxy plus the handles needed to stop it. Every test boots through
+/// `Application`, so the path under test is the one `main` uses.
+pub struct TestApp {
+    pub addr: String,
+    pub shutdown: CancellationToken,
+    pub server: JoinHandle<anyhow::Result<()>>,
+}
+
+pub async fn spawn_app_with_handle(settings: Settings, observer: Arc<dyn Observer>) -> TestApp {
+    let app = Application::build(settings, observer)
+        .await
+        .expect("app build failed");
+    let addr = format!("http://127.0.0.1:{}", app.port());
+
+    let shutdown = CancellationToken::new();
+    let server = tokio::spawn(app.run_until_stopped(shutdown.clone()));
+
+    TestApp {
+        addr,
+        shutdown,
+        server,
+    }
+}
+
+/// The common case: the address is all the test needs, and the server is left to
+/// die with the runtime at the end of the test.
+pub async fn spawn_app(settings: Settings, observer: Arc<dyn Observer>) -> String {
+    spawn_app_with_handle(settings, observer).await.addr
 }
