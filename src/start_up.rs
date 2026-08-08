@@ -78,22 +78,16 @@ where
 {
     rpcs.into_iter()
         .filter_map(|item| {
-            match UpstreamBuilder::default()
-                .with_label(item.label.as_str())
-                .with_rpc_timeout_in_secs(rpc_timeout_in_secs)
-                .with_url(item.rpc_url)
-                .build()
-            {
-                Ok(upstream) => Some(upstream),
-                Err(err) => {
+            UpstreamBuilder::new(&item.label, &item.rpc_url)
+                .and_then(|builder| builder.with_rpc_timeout_in_secs(rpc_timeout_in_secs).build())
+                .map_err(|err| {
                     tracing::warn!(
                         event = "upstream_skipped",
-                        upstream = %&item.label,
+                        upstream = %item.label,
                         error = %err,
                     );
-                    None
-                }
-            }
+                })
+                .ok()
         })
         .collect()
 }
