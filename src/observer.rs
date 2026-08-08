@@ -1,7 +1,12 @@
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
+
+use tracing::warn;
 
 use crate::upstream::{CallError, CallRecord, UpstreamId};
 
@@ -25,7 +30,7 @@ impl Observer for NoopObserver {
     }
 }
 
-pub const BUCKET_BOUNDS_MICROS: [u64; 12] = [
+pub const BUCKET_BOUNDS_MICROS: [u64; 10] = [
     5_000,     // 0.005  local node floor
     10_000,    // 0.01
     25_000,    // 0.025
@@ -34,10 +39,8 @@ pub const BUCKET_BOUNDS_MICROS: [u64; 12] = [
     250_000,   // 0.25
     500_000,   // 0.5
     1_000_000, // 1.0
-    1_500_000, // 1.5
-    2_000_000, // 2.0
     3_000_000, // 3.0   = DEFAULT_RPC_TIMEOUT_IN_SECS
-    4_000_000, // 4.0   timeout fired late
+    5_000_000, // 5.0   timeout fired late
 ];
 
 #[derive(Default)]
@@ -78,14 +81,14 @@ pub struct StatsSnapshot {
 }
 
 pub struct MetricsObserver {
-    stats: HashMap<UpstreamId, UpstreamStats>,
+    stats: HashMap<UpstreamId, Arc<UpstreamStats>>,
 }
 
 impl MetricsObserver {
     pub fn new(upstreams: impl IntoIterator<Item = UpstreamId>) -> Self {
         let mut stats = HashMap::new();
         for upstream in upstreams.into_iter() {
-            stats.insert(upstream.clone(), UpstreamStats::default());
+            stats.insert(upstream.clone(), Arc::new(UpstreamStats::default()));
         }
         MetricsObserver { stats }
     }
@@ -98,10 +101,10 @@ impl MetricsObserver {
 
 impl Observer for MetricsObserver {
     fn record(&self, upstream: &UpstreamId, record: CallRecord<'_>) {
-        let stat = self
-            .stats
-            .get(upstream)
-            .expect("Trying to set record for an unidentified upstream");
+        let Some(stat) = self.stats.get(upstream) else {
+            warn!(event = "metrics_upstream_unknown", upstream = %upstream);
+            return;
+        };
         let counter = match &record.outcome {
             Ok(_) => &stat.success,
             Err(CallError::ErrorStatus { .. }) => &stat.error_status,
@@ -116,7 +119,8 @@ impl Observer for MetricsObserver {
         stat.duration_micros_total
             .fetch_add(duration_micros, Ordering::Relaxed);
 
-        // Update buckets: increment all buckets >= this duration
+        // The slot of the first bound this duration is `le`. Anything past the
+        // last bound gets no slot — `+Inf` covers it, derived at render.
         let bucket_idx = BUCKET_BOUNDS_MICROS.partition_point(|&b| b < duration_micros);
         if bucket_idx < stat.buckets.len() {
             stat.buckets[bucket_idx].fetch_add(1, Ordering::Relaxed);
@@ -137,7 +141,6 @@ mod tests {
         Arc::new(MetricsObserver::new(upstreams))
     }
 
-    // update across tasks
     #[tokio::test]
     async fn test_single_record_updates_bucket() {
         let observer = create_observer();
@@ -145,7 +148,7 @@ mod tests {
 
         let record = CallRecord {
             outcome: Ok(StatusCode::OK),
-            duration: Duration::from_micros(100_000), // 0.1ms
+            duration: Duration::from_micros(100_000), // 100ms
         };
 
         observer.record(&upstream_id, record);
@@ -209,8 +212,8 @@ mod tests {
         let stats = observer.stats.get(&upstream_id).unwrap();
         assert_eq!(stats.success.load(Ordering::Relaxed), 100);
 
-        // All 100 records fit in bucket >= 100_000
-        assert!(stats.buckets[4].load(Ordering::Relaxed) >= 100);
+        // 91_000..=100_000 all sit in the one (50_000, 100_000] slot.
+        assert_eq!(stats.buckets[4].load(Ordering::Relaxed), 100);
     }
 
     #[tokio::test]
