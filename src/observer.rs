@@ -51,6 +51,32 @@ pub struct UpstreamStats {
     pub duration_micros_total: AtomicU64,
 }
 
+impl UpstreamStats {
+    pub fn snapshot(&self) -> StatsSnapshot {
+        StatsSnapshot {
+            success: self.success.load(Ordering::Relaxed),
+            unreachable: self.unreachable.load(Ordering::Relaxed),
+            read_failed: self.read_failed.load(Ordering::Relaxed),
+            error_status: self.error_status.load(Ordering::Relaxed),
+            buckets: self
+                .buckets
+                .each_ref()
+                .map(|bucket| bucket.load(Ordering::Relaxed)),
+            duration_micros_total: self.duration_micros_total.load(Ordering::Relaxed),
+        }
+    }
+}
+
+pub struct StatsSnapshot {
+    pub success: u64,
+    pub unreachable: u64,
+    pub read_failed: u64,
+    pub error_status: u64,
+
+    pub buckets: [u64; BUCKET_BOUNDS_MICROS.len()],
+    pub duration_micros_total: u64,
+}
+
 pub struct MetricsObserver {
     stats: HashMap<UpstreamId, UpstreamStats>,
 }
@@ -62,6 +88,11 @@ impl MetricsObserver {
             stats.insert(upstream.clone(), UpstreamStats::default());
         }
         MetricsObserver { stats }
+    }
+
+    /// `None` for an upstream this observer was not built with.
+    pub fn snapshot(&self, upstream: &UpstreamId) -> Option<StatsSnapshot> {
+        Some(self.stats.get(upstream)?.snapshot())
     }
 }
 
@@ -86,10 +117,9 @@ impl Observer for MetricsObserver {
             .fetch_add(duration_micros, Ordering::Relaxed);
 
         // Update buckets: increment all buckets >= this duration
-        for (i, &bound) in BUCKET_BOUNDS_MICROS.iter().enumerate() {
-            if duration_micros <= bound {
-                stat.buckets[i].fetch_add(1, Ordering::Relaxed);
-            }
+        let bucket_idx = BUCKET_BOUNDS_MICROS.partition_point(|&b| b < duration_micros);
+        if bucket_idx < stat.buckets.len() {
+            stat.buckets[bucket_idx].fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -125,27 +155,29 @@ mod tests {
         assert_eq!(stats.buckets[4].load(Ordering::Relaxed), 1); // 100_000 bucket
     }
 
+    /// Slots hold the count that fell into that band alone, not the running
+    /// `le` total — accumulating into cumulative form is the exposition's job.
     #[tokio::test]
-    async fn test_bucket_cumulative_increments() {
+    async fn test_record_lands_in_exactly_one_bucket() {
         let observer = create_observer();
         let upstream_id = UpstreamId::new("upstream-1");
 
         let record = CallRecord {
             outcome: Ok(StatusCode::OK),
-            duration: Duration::from_micros(50_000), // 0.05ms
+            duration: Duration::from_micros(50_000), // the bound at index 3
         };
 
         observer.record(&upstream_id, record);
 
         let stats = observer.stats.get(&upstream_id).unwrap();
+        let counts = stats
+            .buckets
+            .each_ref()
+            .map(|bucket| bucket.load(Ordering::Relaxed));
 
-        // 50_000 is <= all bounds from index 3 onwards
-        assert_eq!(stats.buckets[3].load(Ordering::Relaxed), 1); // 50_000 ✓
-        assert_eq!(stats.buckets[4].load(Ordering::Relaxed), 1); // 100_000 ✓
-        assert_eq!(stats.buckets[5].load(Ordering::Relaxed), 1); // 250_000 ✓
-
-        // But not earlier buckets
-        assert_eq!(stats.buckets[2].load(Ordering::Relaxed), 0); // 25_000 ✗
+        let mut expected = [0u64; BUCKET_BOUNDS_MICROS.len()];
+        expected[3] = 1;
+        assert_eq!(counts, expected);
     }
 
     #[tokio::test]
