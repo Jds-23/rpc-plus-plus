@@ -11,12 +11,18 @@ use std::{
 use tracing::{Instrument, error, info, info_span, warn};
 use uuid::Uuid;
 
-use crate::{decider::Decider, rpc_handler::RpcHandler};
+use crate::{
+    decider::Decider,
+    observer::Observer,
+    upstream::{CallError, CallOutcome, Upstream, UpstreamId},
+};
 
 const DEFAULT_MAX_ATTEMPT: u64 = 3;
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
+const JSONRPC_INTERNAL_ERROR: i64 = -32603;
 
 pub struct ProxyState {
+    observer: Arc<dyn Observer>,
     decider: Arc<dyn Decider>,
     max_attempt: usize,
     retry_after: Duration,
@@ -24,28 +30,33 @@ pub struct ProxyState {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyStateBuildError {
-    #[error("no decider was provided")]
-    NoDecider,
     #[error("max_attempt must be at least 1")]
     ZeroMaxAttempt,
 }
 
-#[derive(Default)]
 pub struct ProxyStateBuilder {
-    decider: Option<Arc<dyn Decider>>,
+    observer: Arc<dyn Observer>,
+    decider: Arc<dyn Decider>,
     max_attempt: Option<u64>,
     retry_after: Option<Duration>,
 }
 
 impl ProxyStateBuilder {
-    pub fn with_decider(mut self, decider: Arc<dyn Decider>) -> Self {
-        self.decider = Some(decider);
-        self
+    pub fn new(decider: Arc<dyn Decider>, observer: Arc<dyn Observer>) -> Self {
+        Self {
+            decider,
+            observer,
+            max_attempt: None,
+            retry_after: None,
+        }
     }
 
-    pub fn with_max_attempt(mut self, count: u64) -> Self {
+    pub fn with_max_attempt(mut self, count: u64) -> Result<Self, ProxyStateBuildError> {
+        if count == 0 {
+            return Err(ProxyStateBuildError::ZeroMaxAttempt);
+        }
         self.max_attempt = Some(count);
-        self
+        Ok(self)
     }
 
     pub fn with_retry_after(mut self, after: Duration) -> Self {
@@ -57,19 +68,14 @@ impl ProxyStateBuilder {
         self.with_retry_after(Duration::from_secs(secs))
     }
 
-    pub fn build(self) -> Result<ProxyState, ProxyStateBuildError> {
-        let decider = self.decider.ok_or(ProxyStateBuildError::NoDecider)?;
-
+    pub fn build(self) -> ProxyState {
         let max_attempt = self.max_attempt.unwrap_or(DEFAULT_MAX_ATTEMPT);
-        if max_attempt == 0 {
-            return Err(ProxyStateBuildError::ZeroMaxAttempt);
-        }
-
-        Ok(ProxyState {
-            decider,
+        ProxyState {
+            decider: self.decider,
+            observer: self.observer,
             max_attempt: max_attempt as usize,
             retry_after: self.retry_after.unwrap_or(DEFAULT_RETRY_AFTER),
-        })
+        }
     }
 }
 
@@ -89,154 +95,118 @@ impl ProxyState {
             return StatusCode::BAD_REQUEST.into_response();
         }
 
-        let handler_chain = self.decider.decide(self.max_attempt);
-        let mut tried: Vec<&str> = Vec::with_capacity(handler_chain.len());
+        let chain = self.decider.decide(self.max_attempt);
+        let mut tried: Vec<&UpstreamId> = Vec::with_capacity(chain.len());
 
-        // An empty chain skips the loop and falls through to `retries_exhausted`
-        // with zero attempts, rather than inventing an event name outside the
-        // logging schema. `RoundRobin` cannot return empty — the builder rejects
-        // `max_attempt == 0` and `RoundRobin::new` rejects an empty rotation — but
-        // a health-scored `Decider` legitimately can once every upstream is
-        // scored out.
-        let mut last_failure = if handler_chain.is_empty() {
-            "no upstream available".to_string()
-        } else {
-            // "unreachable" unless a read is what actually failed last
-            "upstream unreachable".to_string()
-        };
+        let mut last_failure: Option<CallError> = None;
 
-        for handler in &handler_chain {
+        for upstream in &chain {
             if tried.len() >= self.max_attempt {
                 break;
             }
             if !tried.is_empty() {
                 tokio::time::sleep(self.retry_after).await;
             }
-            tried.push(handler.label());
+            tried.push(upstream.id());
 
-            match Self::try_once(handler, &body, tried.len() as u64).await {
+            match self.try_once(upstream, &body, tried.len() as u64).await {
                 Ok(response) => {
                     info!(
                         event = "request_completed",
                         attempts = tried.len(),
-                        upstream = %handler.label(),
+                        upstream = %upstream.id(),
                         duration_ms = elapsed_ms(received_at),
                     );
                     return response;
                 }
-                Err(reason) => last_failure = reason,
+                Err(failure) => last_failure = Some(failure),
             }
         }
+
+        let error = match &last_failure {
+            Some(failure) => failure.to_string(),
+            None => "no upstream available".to_string(),
+        };
 
         error!(
             event = "retries_exhausted",
             attempts = tried.len(),
             tried = ?tried,
             duration_ms = elapsed_ms(received_at),
-            error = %last_failure,
+            error = %error,
         );
-        rpc_error(-32603, &last_failure)
+        rpc_error(JSONRPC_INTERNAL_ERROR, &error)
     }
 
     async fn try_once(
-        handler: &RpcHandler,
+        &self,
+        upstream: &Upstream,
         body: &Bytes,
         attempt: u64,
-    ) -> Result<Response, String> {
-        let attempt_start = Instant::now();
-        let upstream = handler.label();
-
-        info!(event = "attempt_started", attempt, upstream = %upstream);
-
-        let res = match handler.proxy(body).await {
-            Ok(res) => res,
-            Err(err) => {
-                // `without_url` strips the upstream URL, which embeds the API key.
-                let error = error_chain(&err.without_url());
-                warn!(
-                    event = "attempt_failed",
-                    attempt,
-                    upstream = %upstream,
-                    duration_ms = elapsed_ms(attempt_start),
-                    error = %error,
-                );
-                return Err(error);
-            }
-        };
-
-        let http_status = res.status();
-
-        let body = match res.bytes().await {
-            Ok(body) => body,
-            Err(err) => {
-                let error = error_chain(&err.without_url());
-                warn!(
-                    event = "attempt_failed",
-                    attempt,
-                    upstream = %upstream,
-                    duration_ms = elapsed_ms(attempt_start),
-                    http_status = http_status.as_u16(),
-                    error = %error,
-                );
-                return Err(error);
-            }
-        };
-
-        let duration_ms = elapsed_ms(attempt_start);
-
-        if http_status != StatusCode::OK {
-            warn!(
-                event = "attempt_failed",
-                attempt,
-                upstream = %upstream,
-                duration_ms,
-                http_status = http_status.as_u16(),
-                error = "upstream returned error status",
-            );
-            // The status rides its own field here, but `retries_exhausted` has no
-            // `http_status`, so the returned text carries it.
-            return Err(format!(
-                "upstream returned error status {}",
-                http_status.as_u16()
-            ));
-        }
-
+    ) -> Result<Response, CallError> {
+        let id = upstream.id();
         info!(
-            event = "attempt_succeeded",
+            event = "attempt_started",
             attempt,
-            upstream = %upstream,
-            duration_ms,
-            http_status = http_status.as_u16(),
-            response_bytes = body.len(),
+            upstream = %id,
         );
-        Ok((
-            http_status,
-            [(header::CONTENT_TYPE, "application/json")],
-            body,
-        )
-            .into_response())
+        let call = upstream.call(body).await;
+        self.observer.record(id, call.record());
+        let duration = call.duration.as_millis() as u64;
+        match call.result {
+            Ok(CallOutcome {
+                http_status,
+                response_body,
+            }) => {
+                info!(
+                    event = "attempt_succeeded",
+                    attempt,
+                    upstream = %id,
+                    duration_ms = duration,
+                    http_status = http_status.as_u16(),
+                    response_bytes = response_body.len(),
+                );
+                Ok((
+                    http_status,
+                    [(header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())],
+                    response_body,
+                )
+                    .into_response())
+            }
+            Err(failure) => {
+                match &failure {
+                    CallError::Unreachable { error } => warn!(
+                        event = "attempt_failed",
+                        attempt,
+                        upstream = %id,
+                        duration_ms = duration,
+                        error = %error,
+                    ),
+                    CallError::ReadFailed { http_status, error } => warn!(
+                        event = "attempt_failed",
+                        attempt,
+                        upstream = %id,
+                        duration_ms = duration,
+                        http_status = http_status.as_u16(),
+                        error = %error,
+                    ),
+                    CallError::ErrorStatus { http_status } => warn!(
+                        event = "attempt_failed",
+                        attempt,
+                        upstream = %id,
+                        duration_ms = duration,
+                        http_status = http_status.as_u16(),
+                        error = "upstream returned error status",
+                    ),
+                }
+                Err(failure)
+            }
+        }
     }
 }
 
 fn elapsed_ms(since: Instant) -> u64 {
     since.elapsed().as_millis() as u64
-}
-
-/// `reqwest::Error`'s own `Display` stops at `error sending request`, which names
-/// no cause. Walking `source()` yields the transport frame that actually failed.
-///
-/// Only ever called on an error already passed through `without_url`; the
-/// remaining frames are transport-level and carry no path, which is where the API
-/// key lives.
-fn error_chain(err: &dyn std::error::Error) -> String {
-    let mut out = err.to_string();
-    let mut source = err.source();
-    while let Some(cause) = source {
-        out.push_str(": ");
-        out.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    out
 }
 
 /// Peeks at the first non-whitespace byte rather than deserialising, so the body
@@ -268,13 +238,13 @@ mod tests {
     #[tokio::test]
     async fn rpc_error_escapes_the_message() {
         let msg = "upstream said \"nope\"\nand hung up";
-        let response = rpc_error(-32603, msg);
+        let response = rpc_error(JSONRPC_INTERNAL_ERROR, msg);
 
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(parsed["error"]["message"], msg);
-        assert_eq!(parsed["error"]["code"], -32603);
+        assert_eq!(parsed["error"]["code"], JSONRPC_INTERNAL_ERROR);
         assert!(parsed["id"].is_null());
     }
 }

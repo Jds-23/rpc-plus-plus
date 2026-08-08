@@ -13,7 +13,7 @@ use crate::{
 pub mod healthz;
 pub mod rpc;
 
-pub fn build_router(state: Arc<ProxyState>) -> Router {
+pub(crate) fn build_router(state: Arc<ProxyState>) -> Router {
     Router::new()
         .route("/healthz", get(get_health))
         .route("/rpc", post(rpc_proxy))
