@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     decider::round_robin::RoundRobin,
-    observer::{NoopObserver, Observer},
+    observer::Observer,
     proxy::ProxyStateBuilder,
     route,
     settings::{RpcSettings, Settings},
@@ -35,7 +35,10 @@ impl Application {
 
         let router = route::build_router(Arc::new(state));
 
-        let addr = format!("127.0.0.1:{}", settings.application_port);
+        let addr = format!(
+            "{}:{}",
+            settings.application_host, settings.application_port
+        );
         let listener = TcpListener::bind(&addr)
             .await
             .with_context(|| format!("failed to bind {addr}"))?;
@@ -79,7 +82,11 @@ where
     rpcs.into_iter()
         .filter_map(|item| {
             UpstreamBuilder::new(&item.label, &item.rpc_url)
-                .and_then(|builder| builder.with_rpc_timeout_in_secs(rpc_timeout_in_secs).build())
+                .and_then(|builder| {
+                    builder
+                        .with_rpc_timeout_in_secs(rpc_timeout_in_secs)
+                        .build()
+                })
                 .map_err(|err| {
                     tracing::warn!(
                         event = "upstream_skipped",
@@ -90,35 +97,4 @@ where
                 .ok()
         })
         .collect()
-}
-
-/// Owns the bind so that `startup_ready` can be emitted once the socket is
-/// actually listening, and so the upstream count never has to escape to `main`
-/// just to be logged. `main` is left with nothing but the serve loop.
-pub async fn start(settings: Settings) -> Result<(TcpListener, Router)> {
-    let upstreams = build_upstreams(settings.rpcs, settings.rpc_timeout_in_secs);
-    let upstream_count = upstreams.len();
-
-    let decider = Arc::new(RoundRobin::new(upstreams).context("failed to build decider")?);
-    let observer = Arc::new(NoopObserver::new());
-
-    let state = ProxyStateBuilder::new(decider, observer)
-        .with_max_attempt(settings.max_attempt)?
-        .with_retry_after_in_secs(settings.retry_after_in_secs)
-        .build();
-
-    let app = route::build_router(Arc::new(state));
-
-    let addr = format!("127.0.0.1:{}", settings.application_port);
-    let listener = TcpListener::bind(&addr)
-        .await
-        .with_context(|| format!("failed to bind {addr}"))?;
-
-    tracing::info!(
-        event = "startup_ready",
-        upstreams = upstream_count,
-        port = settings.application_port,
-    );
-
-    Ok((listener, app))
 }

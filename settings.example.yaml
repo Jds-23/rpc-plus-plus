@@ -10,6 +10,9 @@ rpcs:
     rpc_url: https://lb.drpc.org/ogrpc?network=ethereum&dkey=XXXX
 
 # Optional, shown with their defaults.
+# application_host: only widen past loopback inside a container. There is no auth
+# yet, so a reachable proxy is an open relay spending your upstream API keys.
+application_host: 127.0.0.1
 max_attempt: 3
 rpc_timeout_in_secs: 3
 retry_after_in_secs: 1

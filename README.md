@@ -38,12 +38,15 @@ rpcs:
     rpc_url: https://eth-mainnet.g.alchemy.com/v2/XXXX
   - label: drpc
     rpc_url: https://lb.drpc.org/ogrpc?network=ethereum&dkey=XXXX
+application_host: 127.0.0.1  # default 127.0.0.1
 max_attempt: 3            # default 3
 rpc_timeout_in_secs: 3    # default 3
 retry_after_in_secs: 1    # default 1
 ```
 
 Only `application_port` and `rpcs` are required. Upstreams are referred to by `label` everywhere in the logs; the URL is never logged.
+
+`application_host` stays on loopback unless you widen it deliberately — inside a container it has to be `0.0.0.0`. There is no auth yet, so a reachable proxy is an open relay spending your upstream API keys.
 
 ## Docs
 

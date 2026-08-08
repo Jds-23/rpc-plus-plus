@@ -14,13 +14,10 @@ use rpc_plus_plus::{
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-/// The defaults every test starts from, matching `settings.rs`'s own except for
-/// the port. Tests that care about a value overwrite the field.
 pub fn test_settings(rpcs: Vec<RpcSettings>) -> Settings {
     Settings {
         rpcs,
-        // The OS picks a free port, so tests can run in parallel. Read back
-        // through `Application::port`.
+        application_host: "127.0.0.1".to_string(),
         application_port: 0,
         max_attempt: 3,
         rpc_timeout_in_secs: 1,
@@ -35,8 +32,6 @@ pub fn rpc(label: &str, rpc_url: impl Into<String>) -> RpcSettings {
     }
 }
 
-/// A running proxy plus the handles needed to stop it. Every test boots through
-/// `Application`, so the path under test is the one `main` uses.
 pub struct TestApp {
     pub addr: String,
     pub shutdown: CancellationToken,
@@ -59,8 +54,6 @@ pub async fn spawn_app_with_handle(settings: Settings, observer: Arc<dyn Observe
     }
 }
 
-/// The common case: the address is all the test needs, and the server is left to
-/// die with the runtime at the end of the test.
 pub async fn spawn_app(settings: Settings, observer: Arc<dyn Observer>) -> String {
     spawn_app_with_handle(settings, observer).await.addr
 }
