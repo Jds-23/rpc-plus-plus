@@ -2,21 +2,26 @@ use std::{collections::HashMap, sync::Arc};
 
 use prometheus::{
     core::{Collector, Desc},
-    proto::{Counter, LabelPair, Metric, MetricFamily, MetricType},
+    proto::{Bucket, Counter, Histogram, LabelPair, Metric, MetricFamily, MetricType},
 };
 
 use crate::{
-    observer::{MetricsObserver, StatsSnapshot},
+    observer::{BUCKET_BOUNDS_MICROS, MetricsObserver, StatsSnapshot},
     upstream::CallError,
 };
 
 const ATTEMPTS_NAME: &str = "rpc_attempts_total";
 const ATTEMPTS_HELP: &str = "Total upstream call attempts by outcome";
+const ATTEMPTS_DURATION_NAME: &str = "rpc_attempt_duration_seconds";
+const ATTEMPTS_DURATION_HELP: &str = "Rpc attempt duration in seconds";
 const SUCCESS: &str = "success";
+
+const MICROS_PER_SECOND: f64 = 1_000_000.0;
 
 pub struct MetricsCollector {
     observer: Arc<MetricsObserver>,
     attempts_desc: Desc,
+    attempts_duration_desc: Desc,
 }
 
 impl MetricsCollector {
@@ -27,9 +32,16 @@ impl MetricsCollector {
             vec!["outcome".to_string(), "upstream".to_string()],
             HashMap::new(),
         )?;
+        let attempts_duration_desc = Desc::new(
+            ATTEMPTS_DURATION_NAME.to_string(),
+            ATTEMPTS_DURATION_HELP.to_string(),
+            vec!["upstream".to_string()],
+            HashMap::new(),
+        )?;
         Ok(MetricsCollector {
             observer,
             attempts_desc,
+            attempts_duration_desc,
         })
     }
 }
@@ -51,16 +63,33 @@ impl Collector for MetricsCollector {
             })
             .collect();
 
-        let mut family = MetricFamily::default();
-        family.set_name(ATTEMPTS_NAME.into());
-        family.set_help(ATTEMPTS_HELP.into());
-        family.set_field_type(MetricType::COUNTER);
-        family.set_metric(metrics);
-        vec![family]
+        let durations = snapshots
+            .iter()
+            .map(|(upstream, snapshot)| histogram_metric(upstream.as_str(), snapshot))
+            .collect();
+
+        vec![
+            family(ATTEMPTS_NAME, ATTEMPTS_HELP, MetricType::COUNTER, metrics),
+            family(
+                ATTEMPTS_DURATION_NAME,
+                ATTEMPTS_DURATION_HELP,
+                MetricType::HISTOGRAM,
+                durations,
+            ),
+        ]
     }
     fn desc(&self) -> Vec<&Desc> {
-        vec![&self.attempts_desc]
+        vec![&self.attempts_desc, &self.attempts_duration_desc]
     }
+}
+
+fn family(name: &str, help: &str, kind: MetricType, metrics: Vec<Metric>) -> MetricFamily {
+    let mut family = MetricFamily::default();
+    family.set_name(name.into());
+    family.set_help(help.into());
+    family.set_field_type(kind);
+    family.set_metric(metrics);
+    family
 }
 
 fn outcomes(snapshot: &StatsSnapshot) -> [(&'static str, u64); 4] {
@@ -78,6 +107,42 @@ fn label(name: &str, value: &str) -> LabelPair {
         value: Some(value.into()),
         ..Default::default()
     }
+}
+
+fn histogram_metric(upstream: &str, snapshot: &StatsSnapshot) -> Metric {
+    let buckets = BUCKET_BOUNDS_MICROS
+        .iter()
+        .zip(cumulative(snapshot.buckets))
+        .map(|(bound_micros, count)| Bucket {
+            upper_bound: Some(*bound_micros as f64 / MICROS_PER_SECOND),
+            cumulative_count: Some(count),
+            ..Default::default()
+        })
+        .collect();
+
+    Metric {
+        label: vec![label("upstream", upstream)],
+        histogram: Histogram {
+            sample_count: Some(attempts(snapshot)),
+            sample_sum: Some(snapshot.duration_micros_total as f64 / MICROS_PER_SECOND),
+            bucket: buckets,
+            ..Default::default()
+        }
+        .into(),
+        ..Default::default()
+    }
+}
+
+fn cumulative(buckets: [u64; BUCKET_BOUNDS_MICROS.len()]) -> [u64; BUCKET_BOUNDS_MICROS.len()] {
+    let mut running = 0;
+    buckets.map(|count| {
+        running += count;
+        running
+    })
+}
+
+fn attempts(snapshot: &StatsSnapshot) -> u64 {
+    outcomes(snapshot).into_iter().map(|(_, count)| count).sum()
 }
 
 fn counter_metric(upstream: &str, outcome: &str, value: u64) -> Metric {
@@ -101,12 +166,12 @@ fn counter_metric(upstream: &str, outcome: &str, value: u64) -> Metric {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use prometheus::{TextEncoder, core::Collector};
+    use prometheus::{TextEncoder, core::Collector, proto::MetricFamily};
     use reqwest::StatusCode;
 
     use crate::{
         observer::{MetricsObserver, Observer},
-        route::metrics::MetricsCollector,
+        route::metrics::{ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, MetricsCollector, cumulative},
         upstream::{CallError, CallRecord, UpstreamId},
     };
 
@@ -121,6 +186,36 @@ rpc_attempts_total{outcome="unreachable",upstream="zulu"} 0
 rpc_attempts_total{outcome="read_failed",upstream="zulu"} 0
 rpc_attempts_total{outcome="error_status",upstream="zulu"} 0
 "#;
+
+    /// One 100ms attempt: `BUCKET_BOUNDS_MICROS` in seconds, cumulative from the
+    /// slot it landed in, and a `+Inf` line the collector never emitted.
+    const EXPECTED_DURATION: &str = r#"# HELP rpc_attempt_duration_seconds Rpc attempt duration in seconds
+# TYPE rpc_attempt_duration_seconds histogram
+rpc_attempt_duration_seconds_bucket{upstream="alpha",le="0.005"} 0
+rpc_attempt_duration_seconds_bucket{upstream="alpha",le="0.01"} 0
+rpc_attempt_duration_seconds_bucket{upstream="alpha",le="0.025"} 0
+rpc_attempt_duration_seconds_bucket{upstream="alpha",le="0.05"} 0
+rpc_attempt_duration_seconds_bucket{upstream="alpha",le="0.1"} 1
+rpc_attempt_duration_seconds_bucket{upstream="alpha",le="0.25"} 1
+rpc_attempt_duration_seconds_bucket{upstream="alpha",le="0.5"} 1
+rpc_attempt_duration_seconds_bucket{upstream="alpha",le="1"} 1
+rpc_attempt_duration_seconds_bucket{upstream="alpha",le="3"} 1
+rpc_attempt_duration_seconds_bucket{upstream="alpha",le="5"} 1
+rpc_attempt_duration_seconds_bucket{upstream="alpha",le="+Inf"} 1
+rpc_attempt_duration_seconds_sum{upstream="alpha"} 0.1
+rpc_attempt_duration_seconds_count{upstream="alpha"} 1
+"#;
+
+    /// One family at a time: each test asserts its own metric's exposition.
+    fn encode(families: &[MetricFamily], name: &str) -> String {
+        let wanted: Vec<MetricFamily> = families
+            .iter()
+            .filter(|family| family.name() == name)
+            .cloned()
+            .collect();
+
+        TextEncoder::new().encode_to_string(&wanted).unwrap()
+    }
 
     #[test]
     fn collect_encodes_expected_lines() {
@@ -162,9 +257,7 @@ rpc_attempts_total{outcome="error_status",upstream="zulu"} 0
             );
         }
 
-        let actual = TextEncoder::new()
-            .encode_to_string(&collector.collect())
-            .unwrap();
+        let actual = encode(&collector.collect(), ATTEMPTS_NAME);
 
         assert_eq!(sorted_lines(&actual), sorted_lines(EXPECTED));
     }
@@ -177,10 +270,94 @@ rpc_attempts_total{outcome="error_status",upstream="zulu"} 0
     }
 
     #[test]
-    fn test_desc_advertises_one_metric() {
+    fn test_desc_advertises_both_families() {
         let observer = Arc::new(MetricsObserver::new(vec![]));
         let collector = MetricsCollector::new(observer.clone()).unwrap();
-        assert!(collector.desc().len() == 1);
+
+        let names: Vec<&str> = collector
+            .desc()
+            .iter()
+            .map(|desc| desc.fq_name.as_str())
+            .collect();
+
+        assert_eq!(names, [ATTEMPTS_NAME, ATTEMPTS_DURATION_NAME]);
+    }
+
+    #[test]
+    fn per_slot_counts_accumulate_into_le_totals() {
+        let slots = [1, 0, 2, 0, 0, 3, 0, 0, 0, 1];
+
+        assert_eq!(cumulative(slots), [1, 1, 3, 3, 3, 6, 6, 6, 6, 7]);
+    }
+
+    #[test]
+    fn the_duration_ladder_renders_in_seconds() {
+        let alpha = UpstreamId::new("alpha");
+        let observer = Arc::new(MetricsObserver::new(vec![alpha.clone()]));
+        let collector = MetricsCollector::new(observer.clone()).unwrap();
+
+        observer.record(
+            &alpha,
+            CallRecord {
+                outcome: Ok(StatusCode::OK),
+                duration: Duration::from_millis(100),
+            },
+        );
+
+        let actual = encode(&collector.collect(), ATTEMPTS_DURATION_NAME);
+
+        assert_eq!(actual, EXPECTED_DURATION);
+    }
+
+    #[test]
+    fn the_inf_bucket_is_derived_and_matches_the_count() {
+        let alpha = UpstreamId::new("alpha");
+        let observer = Arc::new(MetricsObserver::new(vec![alpha.clone()]));
+        let collector = MetricsCollector::new(observer.clone()).unwrap();
+
+        observer.record(
+            &alpha,
+            CallRecord {
+                outcome: Ok(StatusCode::OK),
+                duration: Duration::from_millis(100),
+            },
+        );
+
+        let unreachable = CallError::Unreachable {
+            error: "unreachable".to_string(),
+        };
+        observer.record(
+            &alpha,
+            CallRecord {
+                outcome: Err(&unreachable),
+                duration: Duration::from_secs(6), // past the 5.0 ceiling
+            },
+        );
+
+        let actual = encode(&collector.collect(), ATTEMPTS_DURATION_NAME);
+
+        let top = sample(&actual, r#"_bucket{upstream="alpha",le="5"}"#);
+        let inf = sample(&actual, r#"_bucket{upstream="alpha",le="+Inf"}"#);
+        let count = sample(&actual, r#"_count{upstream="alpha"}"#);
+        let sum = sample(&actual, r#"_sum{upstream="alpha"}"#);
+
+        assert_eq!(inf, count, "+Inf must carry every attempt");
+        assert_eq!(count, 2.0);
+        assert!(inf > top, "the over-ceiling attempt has no finite bucket");
+        assert_eq!(sum, 6.1, "seconds, summed across both attempts");
+    }
+
+    fn sample(text: &str, suffix: &str) -> f64 {
+        let line = text
+            .lines()
+            .find(|line| line.split(' ').next().is_some_and(|s| s.ends_with(suffix)))
+            .unwrap_or_else(|| panic!("no sample line ending in {suffix}:\n{text}"));
+
+        line.rsplit_once(' ')
+            .expect("a sample line carries a value")
+            .1
+            .parse()
+            .expect("the value parses as f64")
     }
 
     fn sorted_lines(s: &str) -> Vec<&str> {
