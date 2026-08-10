@@ -97,6 +97,16 @@ impl MetricsObserver {
     pub fn snapshot(&self, upstream: &UpstreamId) -> Option<StatsSnapshot> {
         Some(self.stats.get(upstream)?.snapshot())
     }
+
+    pub fn snapshots(&self) -> Vec<(&UpstreamId, StatsSnapshot)> {
+        let mut out: Vec<_> = self
+            .stats
+            .iter()
+            .map(|(upstream_id, stat)| (upstream_id, stat.snapshot()))
+            .collect();
+        out.sort_unstable_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+        out
+    }
 }
 
 impl Observer for MetricsObserver {
@@ -139,6 +149,25 @@ mod tests {
     fn create_observer() -> Arc<MetricsObserver> {
         let upstreams = vec![UpstreamId::new("upstream-1"), UpstreamId::new("upstream-2")];
         Arc::new(MetricsObserver::new(upstreams))
+    }
+
+    /// Built out of order on purpose: `HashMap` iteration is randomised per
+    /// process, so an unsorted scrape would pass some runs and reorder others.
+    #[test]
+    fn test_snapshots_are_sorted_by_label() {
+        let observer = MetricsObserver::new(vec![
+            UpstreamId::new("zulu"),
+            UpstreamId::new("alpha"),
+            UpstreamId::new("mike"),
+        ]);
+
+        let labels: Vec<&str> = observer
+            .snapshots()
+            .iter()
+            .map(|(upstream_id, _)| upstream_id.as_str())
+            .collect();
+
+        assert_eq!(labels, ["alpha", "mike", "zulu"]);
     }
 
     #[tokio::test]
