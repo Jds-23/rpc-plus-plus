@@ -149,6 +149,17 @@ pub enum CallError {
 }
 
 impl CallError {
+    pub const UNREACHABLE: &'static str = "unreachable";
+    pub const READ_FAILED: &'static str = "read_failed";
+    pub const ERROR_STATUS: &'static str = "error_status";
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CallError::Unreachable { .. } => Self::UNREACHABLE,
+            CallError::ReadFailed { .. } => Self::READ_FAILED,
+            CallError::ErrorStatus { .. } => Self::ERROR_STATUS,
+        }
+    }
     /// `None` for `Unreachable`: no response arrived to carry a status.
     pub fn http_status(&self) -> Option<StatusCode> {
         match self {

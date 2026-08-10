@@ -11,6 +11,7 @@ use crate::{
 };
 
 pub mod healthz;
+pub mod metrics;
 pub mod rpc;
 
 pub(crate) fn build_router(state: Arc<ProxyState>) -> Router {
