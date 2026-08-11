@@ -1,7 +1,4 @@
-use std::sync::Arc;
-
 use reqwest::StatusCode;
-use rpc_plus_plus::observer::NoopObserver;
 
 use crate::common::{rpc, spawn_app, test_settings};
 
@@ -14,7 +11,7 @@ const DEAD_URL: &str = "http://127.0.0.1:1/";
 #[tokio::test]
 async fn healthz_returns_ok() {
     let settings = test_settings(vec![rpc("fake", DEAD_URL)]);
-    let addr = spawn_app(settings, Arc::new(NoopObserver::new())).await;
+    let addr = spawn_app(settings).await;
 
     let res = reqwest::Client::new()
         .get(format!("{addr}/healthz"))

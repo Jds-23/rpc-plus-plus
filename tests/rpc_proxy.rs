@@ -1,7 +1,6 @@
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 
 use reqwest::StatusCode;
-use rpc_plus_plus::observer::NoopObserver;
 use serde_json::json;
 
 use crate::common::{mock_rpc_server, rpc, spawn_app, test_settings};
@@ -12,7 +11,7 @@ mod common;
 async fn proxies_reponse_from_upstream() {
     let mock_rpc_server = mock_rpc_server::ok("0x1").await;
     let settings = test_settings(vec![rpc("one", mock_rpc_server.uri())]);
-    let addr = spawn_app(settings, Arc::new(NoopObserver::new())).await;
+    let addr = spawn_app(settings).await;
 
     let res = reqwest::Client::new()
         .post(format!("{addr}/rpc"))
@@ -30,7 +29,7 @@ async fn round_robin_distributes_evenly() {
     let a = mock_rpc_server::ok("0xa").await;
     let b = mock_rpc_server::ok("0xb").await;
     let settings = test_settings(vec![rpc("one", a.uri()), rpc("two", b.uri())]);
-    let addr = spawn_app(settings, Arc::new(NoopObserver::new())).await;
+    let addr = spawn_app(settings).await;
 
     let client = reqwest::Client::new();
     for index in 0..4 {
@@ -60,7 +59,7 @@ async fn works_fine_when_one_uptream_works() {
     let b = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
     let mut settings = test_settings(vec![rpc("one", a.uri()), rpc("two", b.uri())]);
     settings.retry_after_in_secs = 0;
-    let addr = spawn_app(settings, Arc::new(NoopObserver::new())).await;
+    let addr = spawn_app(settings).await;
 
     let client = reqwest::Client::new();
     for _ in 0..4 {
@@ -89,7 +88,7 @@ async fn non_works_fine_retry_and_propagate_last_error() {
     let mut settings = test_settings(vec![rpc("one", a.uri()), rpc("two", b.uri())]);
     settings.max_attempt = 2;
     settings.retry_after_in_secs = 0;
-    let addr = spawn_app(settings, Arc::new(NoopObserver::new())).await;
+    let addr = spawn_app(settings).await;
 
     let client = reqwest::Client::new();
     for _ in 0..4 {
@@ -119,7 +118,7 @@ async fn single_upstream_is_tried_once() {
     let mut settings = test_settings(vec![rpc("one", a.uri())]);
     settings.max_attempt = 3;
     settings.retry_after_in_secs = 3;
-    let addr = spawn_app(settings, Arc::new(NoopObserver::new())).await;
+    let addr = spawn_app(settings).await;
 
     let started_at = Instant::now();
     let res = reqwest::Client::new()

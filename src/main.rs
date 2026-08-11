@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use rpc_plus_plus::{observer::NoopObserver, settings, start_up::Application, telemetry};
+use rpc_plus_plus::{
+    observer::MetricsObserver, settings, start_up::Application, telemetry, upstream::UpstreamId,
+};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -8,7 +10,16 @@ async fn main() {
     telemetry::init();
 
     let built = match settings::get_settings() {
-        Ok(settings) => Application::build(settings, Arc::new(NoopObserver::new())).await,
+        Ok(settings) => {
+            let observer = Arc::new(MetricsObserver::new(
+                settings
+                    .rpcs
+                    .iter()
+                    .map(|rpc| UpstreamId::new(rpc.label.as_str())),
+            ));
+
+            Application::build(settings, observer).await
+        }
         Err(err) => Err(err),
     };
 

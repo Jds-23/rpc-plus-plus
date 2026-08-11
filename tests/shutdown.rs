@@ -1,7 +1,6 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use reqwest::StatusCode;
-use rpc_plus_plus::observer::NoopObserver;
 
 use crate::common::{mock_rpc_server, rpc, spawn_app_with_handle, test_settings};
 
@@ -14,11 +13,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 #[tokio::test]
 async fn cancelling_the_token_stops_the_server() {
     let upstream = mock_rpc_server::ok("0x1").await;
-    let app = spawn_app_with_handle(
-        test_settings(vec![rpc("one", upstream.uri())]),
-        Arc::new(NoopObserver::new()),
-    )
-    .await;
+    let app = spawn_app_with_handle(test_settings(vec![rpc("one", upstream.uri())])).await;
 
     // Serving before the cancellation, so a pass cannot come from never having
     // started.
@@ -42,11 +37,7 @@ async fn cancelling_the_token_stops_the_server() {
 /// real shutdown from a task that stopped polling.
 #[tokio::test]
 async fn the_port_is_free_once_the_server_stops() {
-    let app = spawn_app_with_handle(
-        test_settings(vec![rpc("one", "http://127.0.0.1:1")]),
-        Arc::new(NoopObserver::new()),
-    )
-    .await;
+    let app = spawn_app_with_handle(test_settings(vec![rpc("one", "http://127.0.0.1:1")])).await;
     let port = app
         .addr
         .rsplit(':')

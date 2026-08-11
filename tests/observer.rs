@@ -8,7 +8,7 @@ use rpc_plus_plus::{
 };
 use serde_json::json;
 
-use crate::common::{mock_rpc_server, rpc, spawn_app, test_settings};
+use crate::common::{mock_rpc_server, rpc, spawn_app_with_observer, test_settings};
 
 mod common;
 
@@ -47,7 +47,7 @@ async fn post(addr: &str) -> reqwest::Response {
 async fn each_upstream_counts_its_own_outcome() {
     let live = mock_rpc_server::ok("0x1").await;
     let (ids, observer) = observer(&["dead", "live"]);
-    let addr = spawn_app(
+    let addr = spawn_app_with_observer(
         settings(vec![rpc("dead", DEAD_URL), rpc("live", live.uri())]),
         observer.clone(),
     )
@@ -75,7 +75,8 @@ async fn each_upstream_counts_its_own_outcome() {
 async fn an_error_status_lands_in_the_error_status_counter() {
     let failing = mock_rpc_server::failing(StatusCode::INTERNAL_SERVER_ERROR).await;
     let (ids, observer) = observer(&["one"]);
-    let addr = spawn_app(settings(vec![rpc("one", failing.uri())]), observer.clone()).await;
+    let addr =
+        spawn_app_with_observer(settings(vec![rpc("one", failing.uri())]), observer.clone()).await;
 
     let body: serde_json::Value = post(&addr).await.json().await.unwrap();
     assert_eq!(
@@ -94,7 +95,7 @@ async fn an_error_status_lands_in_the_error_status_counter() {
 async fn recorded_duration_stays_within_the_request() {
     let live = mock_rpc_server::ok("0x1").await;
     let (ids, observer) = observer(&["dead", "live"]);
-    let addr = spawn_app(
+    let addr = spawn_app_with_observer(
         settings(vec![rpc("dead", DEAD_URL), rpc("live", live.uri())]),
         observer.clone(),
     )
