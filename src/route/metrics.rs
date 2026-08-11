@@ -1,9 +1,16 @@
 use std::{collections::HashMap, sync::Arc};
 
+use axum::{
+    extract::State,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+};
 use prometheus::{
+    Encoder, Registry, TextEncoder,
     core::{Collector, Desc},
     proto::{Bucket, Counter, Histogram, LabelPair, Metric, MetricFamily, MetricType},
 };
+use tracing::error;
 
 use crate::{
     observer::{BUCKET_BOUNDS_MICROS, MetricsObserver, StatsSnapshot},
@@ -162,16 +169,36 @@ fn counter_metric(upstream: &str, outcome: &str, value: u64) -> Metric {
     }
 }
 
+pub async fn get_metrics(State(registry): State<Arc<Registry>>) -> Response {
+    let encoder = TextEncoder::new();
+
+    match encoder.encode_to_string(&registry.gather()) {
+        Ok(body) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, encoder.format_type())],
+            body,
+        )
+            .into_response(),
+        Err(err) => {
+            error!(event = "metrics_render_failed", error = %err);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use prometheus::{TextEncoder, core::Collector, proto::MetricFamily};
+    use axum::extract::State;
+    use prometheus::{Encoder, Registry, TextEncoder, core::Collector, proto::MetricFamily};
     use reqwest::StatusCode;
 
     use crate::{
         observer::{MetricsObserver, Observer},
-        route::metrics::{ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, MetricsCollector, cumulative},
+        route::metrics::{
+            ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, MetricsCollector, cumulative, get_metrics,
+        },
         upstream::{CallError, CallRecord, UpstreamId},
     };
 
@@ -358,6 +385,22 @@ rpc_attempt_duration_seconds_count{upstream="alpha"} 1
             .1
             .parse()
             .expect("the value parses as f64")
+    }
+
+    #[tokio::test]
+    async fn get_metrics_answers_ok_with_the_exposition_content_type() {
+        let registry = Arc::new(Registry::new());
+
+        let response = get_metrics(State(registry)).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            TextEncoder::new().format_type()
+        );
     }
 
     fn sorted_lines(s: &str) -> Vec<&str> {

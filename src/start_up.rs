@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::Router;
+use prometheus::Registry;
 use tokio::{net::TcpListener, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -33,7 +34,7 @@ impl Application {
             .with_retry_after_in_secs(settings.retry_after_in_secs)
             .build();
 
-        let router = route::build_router(Arc::new(state));
+        let router = route::build_router(Arc::new(state), Arc::new(Registry::new()));
 
         let addr = format!(
             "{}:{}",
