@@ -1,8 +1,7 @@
-# Keep the build context small and keep secrets out of it.
 target/
 
-# Provider URLs carry API keys. Never let this reach a layer.
 settings.yaml
+.env
 
 .git/
 .github/

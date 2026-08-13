@@ -26,18 +26,19 @@ Deliberately not here yet: caching, least-latency routing, hedging, in-flight de
 
 ```sh
 cp settings.example.yaml settings.yaml   # then fill in your upstreams
+export ALCHEMY_KEY=...                   # or write it to a gitignored .env
 cargo run
 ```
 
-`settings.yaml` is gitignored — provider URLs embed API keys in the path.
+`settings.yaml` is gitignored — a URL written out in full embeds the API key in its path.
 
 ```yaml
 application_port: 8080
 rpcs:
   - label: alchemy
-    rpc_url: https://eth-mainnet.g.alchemy.com/v2/XXXX
+    rpc_url: https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_KEY}
   - label: drpc
-    rpc_url: https://lb.drpc.org/ogrpc?network=ethereum&dkey=XXXX
+    rpc_url: https://lb.drpc.org/ogrpc?network=ethereum&dkey=${DRPC_KEY}
 application_host: 127.0.0.1  # default 127.0.0.1
 max_attempt: 3            # default 3
 rpc_timeout_in_secs: 3    # default 3
@@ -45,6 +46,10 @@ retry_after_in_secs: 1    # default 1
 ```
 
 Only `application_port` and `rpcs` are required. Upstreams are referred to by `label` everywhere in the logs; the URL is never logged.
+
+`${VAR}` is expanded from the environment at startup, so keys stay out of the file. An unset or empty variable stops startup with a `startup_failed` line naming the **variable** — never the URL. A bare `$VAR` is literal text; the braces are required. Labels must be unique, and no two upstreams may share a URL: both are startup failures, since a duplicate label merges two providers into one identity and a duplicate URL turns failover into the same provider twice.
+
+Set `RPC_CONFIG_PATH` to read the config from somewhere other than `./settings.yaml`.
 
 `application_host` stays on loopback unless you widen it deliberately — inside a container it has to be `0.0.0.0`. There is no auth yet, so a reachable proxy is an open relay spending your upstream API keys.
 
