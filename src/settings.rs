@@ -1,7 +1,13 @@
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
+
 use anyhow::{Context, Result};
 use config::{Config, Source};
 
-const CONFIG_FILE: &str = "settings.yaml";
+const DEFAULT_CONFIG_FILE: &str = "settings.yaml";
+const CONFIG_PATH_ENV: &str = "RPC_CONFIG_PATH";
 
 #[derive(serde::Deserialize)]
 pub struct Settings {
@@ -19,20 +25,39 @@ pub struct RpcSettings {
     pub rpc_url: String,
 }
 
-pub fn get_settings() -> Result<Settings> {
-    settings_from(config::File::with_name(CONFIG_FILE))
+#[derive(Debug, thiserror::Error)]
+pub enum SettingsError {
+    #[error("environment variable {0} is unset")]
+    UnsetEnvVar(String),
+    #[error("upstream {label} still holds an unexpanded ${{...}} placeholder")]
+    ResidualPlaceholder { label: String },
+    #[error("rpcs must not be empty")]
+    EmptyRpcs,
+    #[error("rpcs[{index}] has an empty label")]
+    EmptyLabel { index: usize },
+    #[error("upstream {label} has an empty rpc_url")]
+    EmptyUrl { label: String },
+    #[error("duplicate label {0}")]
+    DuplicateLabel(String),
+    #[error("upstreams {first} and {second} share an rpc_url")]
+    DuplicateUrl { first: String, second: String },
 }
 
-/// Takes the source rather than naming the file, so the defaults below are
-/// reachable from a test without a `settings.yaml` on disk — it is gitignored,
-/// so no test could rely on one being there.
-fn settings_from<S>(source: S) -> Result<Settings>
+pub fn get_settings() -> Result<Settings> {
+    let path = std::env::var(CONFIG_PATH_ENV).ok();
+    let source = match path.as_deref() {
+        Some(path) => config::File::from(Path::new(path)),
+        None => config::File::with_name(DEFAULT_CONFIG_FILE),
+    };
+
+    settings_from(source, &|key| std::env::var(key).ok())
+}
+
+fn settings_from<S>(source: S, get: &dyn Fn(&str) -> Option<String>) -> Result<Settings>
 where
     S: Source + Send + Sync + 'static,
 {
-    Config::builder()
-        // Loopback: widening the bind is a deliberate act, because there is no
-        // auth yet and a reachable proxy spends the upstream API keys.
+    let mut settings = Config::builder()
         .set_default("application_host", "127.0.0.1")?
         .set_default("max_attempt", 3)?
         .set_default("rpc_timeout_in_secs", 3)?
@@ -40,7 +65,92 @@ where
         .add_source(source)
         .build()?
         .try_deserialize::<Settings>()
-        .context("invalid settings")
+        .context("invalid settings")?;
+
+    expand_env(&mut settings, get).context("invalid settings")?;
+    validate_settings(&settings).context("invalid settings")?;
+
+    Ok(settings)
+}
+
+fn expand_env(
+    settings: &mut Settings,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), SettingsError> {
+    settings.application_host = expand_str(&settings.application_host, get)?;
+
+    for rpc in &mut settings.rpcs {
+        rpc.label = expand_str(&rpc.label, get)?;
+        rpc.rpc_url = expand_str(&rpc.rpc_url, get)?;
+    }
+
+    Ok(())
+}
+
+fn expand_str(raw: &str, get: &dyn Fn(&str) -> Option<String>) -> Result<String, SettingsError> {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+
+    while let Some(start) = rest.find("${") {
+        let (before, marker) = rest.split_at(start);
+        let body = &marker[2..];
+        let Some(end) = body.find('}') else {
+            break;
+        };
+
+        out.push_str(before);
+
+        let name = &body[..end];
+        if name.trim().is_empty() {
+            out.push_str(&marker[..end + 3]);
+        } else {
+            match get(name) {
+                Some(value) if !value.is_empty() => out.push_str(&value),
+                _ => return Err(SettingsError::UnsetEnvVar(name.to_string())),
+            }
+        }
+
+        rest = &body[end + 1..];
+    }
+
+    out.push_str(rest);
+    Ok(out)
+}
+
+fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
+    if settings.rpcs.is_empty() {
+        return Err(SettingsError::EmptyRpcs);
+    }
+
+    let mut labels: HashSet<&str> = HashSet::new();
+    let mut urls: HashMap<&str, &str> = HashMap::new();
+
+    for (index, rpc) in settings.rpcs.iter().enumerate() {
+        if rpc.label.trim().is_empty() {
+            return Err(SettingsError::EmptyLabel { index });
+        }
+        if rpc.rpc_url.trim().is_empty() {
+            return Err(SettingsError::EmptyUrl {
+                label: rpc.label.clone(),
+            });
+        }
+        if rpc.label.contains("${") || rpc.rpc_url.contains("${") {
+            return Err(SettingsError::ResidualPlaceholder {
+                label: rpc.label.clone(),
+            });
+        }
+        if !labels.insert(rpc.label.as_str()) {
+            return Err(SettingsError::DuplicateLabel(rpc.label.clone()));
+        }
+        if let Some(first) = urls.insert(rpc.rpc_url.as_str(), rpc.label.as_str()) {
+            return Err(SettingsError::DuplicateUrl {
+                first: first.to_string(),
+                second: rpc.label.clone(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -57,7 +167,33 @@ rpcs:
 "#;
 
     fn parse(yaml: &str) -> Result<Settings> {
-        settings_from(File::from_str(yaml, FileFormat::Yaml))
+        parse_with_env(yaml, &[])
+    }
+
+    fn parse_with_env(yaml: &str, env: &[(&str, &str)]) -> Result<Settings> {
+        let env: HashMap<String, String> = env
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+
+        settings_from(File::from_str(yaml, FileFormat::Yaml), &|key| {
+            env.get(key).cloned()
+        })
+    }
+
+    fn error_of(yaml: &str, env: &[(&str, &str)]) -> String {
+        match parse_with_env(yaml, env) {
+            Ok(_) => panic!("the config should be rejected"),
+            Err(err) => format!("{err:#}"),
+        }
+    }
+
+    fn rpcs(entries: &[(&str, &str)]) -> String {
+        let mut yaml = String::from("application_port: 8080\nrpcs:\n");
+        for (label, url) in entries {
+            yaml.push_str(&format!("  - label: {label}\n    rpc_url: {url}\n"));
+        }
+        yaml
     }
 
     #[test]
@@ -92,5 +228,140 @@ rpcs:
             parse("application_port: 8080\n").is_err(),
             "rpcs has no default"
         );
+    }
+
+    #[test]
+    fn an_empty_upstream_list_is_an_error() {
+        let error = error_of("application_port: 8080\nrpcs: []\n", &[]);
+
+        assert!(error.contains("rpcs must not be empty"), "{error}");
+    }
+
+    #[test]
+    fn a_placeholder_is_expanded_from_the_environment() {
+        let yaml = rpcs(&[("one", "https://provider.example/v2/${ALCHEMY_KEY}")]);
+        let settings =
+            parse_with_env(&yaml, &[("ALCHEMY_KEY", "secret")]).expect("the config should load");
+
+        assert_eq!(
+            settings.rpcs[0].rpc_url,
+            "https://provider.example/v2/secret"
+        );
+    }
+
+    #[test]
+    fn every_string_field_is_expanded() {
+        let yaml = format!(
+            "{}application_host: ${{HOST}}\n",
+            rpcs(&[("${NAME}", "https://provider.example/${A}/${B}")])
+        );
+        let settings = parse_with_env(
+            &yaml,
+            &[
+                ("HOST", "0.0.0.0"),
+                ("NAME", "alchemy"),
+                ("A", "v2"),
+                ("B", "key"),
+            ],
+        )
+        .expect("the config should load");
+
+        assert_eq!(settings.application_host, "0.0.0.0");
+        assert_eq!(settings.rpcs[0].label, "alchemy");
+        assert_eq!(settings.rpcs[0].rpc_url, "https://provider.example/v2/key");
+    }
+
+    #[test]
+    fn a_bare_dollar_variable_is_left_alone() {
+        let yaml = rpcs(&[("one", "https://provider.example/$ALCHEMY_KEY")]);
+        let settings =
+            parse_with_env(&yaml, &[("ALCHEMY_KEY", "secret")]).expect("the config should load");
+
+        assert_eq!(
+            settings.rpcs[0].rpc_url,
+            "https://provider.example/$ALCHEMY_KEY"
+        );
+    }
+
+    #[test]
+    fn an_unset_variable_fails_startup_and_names_the_variable() {
+        let yaml = rpcs(&[("one", "https://provider.example/v2/${ALCHEMY_KEY}")]);
+        let error = error_of(&yaml, &[]);
+
+        assert!(error.contains("ALCHEMY_KEY"), "{error}");
+        assert!(error.contains("unset"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_variable_counts_as_unset() {
+        let yaml = rpcs(&[("one", "https://provider.example/v2/${ALCHEMY_KEY}")]);
+        let error = error_of(&yaml, &[("ALCHEMY_KEY", "")]);
+
+        assert!(error.contains("ALCHEMY_KEY"), "{error}");
+    }
+
+    #[test]
+    fn an_expansion_failure_never_reveals_the_url() {
+        let yaml = rpcs(&[(
+            "alchemy",
+            "https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_KEY}",
+        )]);
+        let error = error_of(&yaml, &[]);
+
+        assert!(!error.contains("alchemy.com"), "{error}");
+        assert!(!error.contains("eth-mainnet"), "{error}");
+    }
+
+    #[test]
+    fn an_unterminated_placeholder_is_rejected_by_label() {
+        let yaml = rpcs(&[("alchemy", "https://provider.example/v2/${ALCHEMY_KEY")]);
+        let error = error_of(&yaml, &[("ALCHEMY_KEY", "secret")]);
+
+        assert!(error.contains("alchemy"), "{error}");
+        assert!(error.contains("placeholder"), "{error}");
+        assert!(!error.contains("provider.example"), "{error}");
+    }
+
+    #[test]
+    fn a_duplicate_label_is_an_error() {
+        let yaml = rpcs(&[
+            ("one", "https://provider.example/a"),
+            ("one", "https://provider.example/b"),
+        ]);
+        let error = error_of(&yaml, &[]);
+
+        assert!(error.contains("duplicate label one"), "{error}");
+    }
+
+    /// The two labels identify the offending entries; the shared URL holds the key.
+    #[test]
+    fn a_duplicate_url_names_both_labels_and_neither_url() {
+        let yaml = rpcs(&[
+            ("alchemy", "https://eth-mainnet.g.alchemy.com/v2/key"),
+            ("alchemy-2", "https://eth-mainnet.g.alchemy.com/v2/key"),
+        ]);
+        let error = error_of(&yaml, &[]);
+
+        assert!(
+            error.contains("alchemy") && error.contains("alchemy-2"),
+            "{error}"
+        );
+        assert!(!error.contains("alchemy.com"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_label_is_an_error() {
+        let yaml = rpcs(&[("\"\"", "https://provider.example/a")]);
+        let error = error_of(&yaml, &[]);
+
+        assert!(error.contains("empty label"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_url_is_an_error() {
+        let yaml = rpcs(&[("one", "\"\"")]);
+        let error = error_of(&yaml, &[]);
+
+        assert!(error.contains("empty rpc_url"), "{error}");
     }
 }

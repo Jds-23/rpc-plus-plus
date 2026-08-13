@@ -7,8 +7,12 @@ services:
       - "${PORT:-8080}:8080"
     volumes:
       - ./settings.yaml:/app/settings.yaml:ro
+    env_file:
+      - path: .env
+        required: false
     environment:
       RUST_LOG: ${RUST_LOG:-info}
+      RPC_CONFIG_PATH: /app/settings.yaml
     stop_grace_period: 10s
   prometheus:
     image: prom/prometheus:latest
