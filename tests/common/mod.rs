@@ -7,9 +7,10 @@ pub mod mock_rpc_server;
 use std::sync::Arc;
 
 use rpc_plus_plus::{
-    observer::Observer,
+    observer::MetricsObserver,
     settings::{RpcSettings, Settings},
     start_up::Application,
+    upstream::UpstreamId,
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -38,7 +39,30 @@ pub struct TestApp {
     pub server: JoinHandle<anyhow::Result<()>>,
 }
 
-pub async fn spawn_app_with_handle(settings: Settings, observer: Arc<dyn Observer>) -> TestApp {
+pub fn observer_for(settings: &Settings) -> Arc<MetricsObserver> {
+    Arc::new(MetricsObserver::new(
+        settings
+            .rpcs
+            .iter()
+            .map(|rpc| UpstreamId::new(rpc.label.as_str())),
+    ))
+}
+
+pub async fn spawn_app_with_handle(settings: Settings) -> TestApp {
+    let observer = observer_for(&settings);
+    build_app(settings, observer).await
+}
+
+pub async fn spawn_app(settings: Settings) -> String {
+    let observer = observer_for(&settings);
+    build_app(settings, observer).await.addr
+}
+
+pub async fn spawn_app_with_observer(settings: Settings, observer: Arc<MetricsObserver>) -> String {
+    build_app(settings, observer).await.addr
+}
+
+async fn build_app(settings: Settings, observer: Arc<MetricsObserver>) -> TestApp {
     let app = Application::build(settings, observer)
         .await
         .expect("app build failed");
@@ -52,8 +76,4 @@ pub async fn spawn_app_with_handle(settings: Settings, observer: Arc<dyn Observe
         shutdown,
         server,
     }
-}
-
-pub async fn spawn_app(settings: Settings, observer: Arc<dyn Observer>) -> String {
-    spawn_app_with_handle(settings, observer).await.addr
 }

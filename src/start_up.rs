@@ -2,14 +2,16 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::Router;
+use prometheus::Registry;
 use tokio::{net::TcpListener, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     decider::round_robin::RoundRobin,
-    observer::Observer,
+    observer::MetricsObserver,
     proxy::ProxyStateBuilder,
     route,
+    route::metrics::MetricsCollector,
     settings::{RpcSettings, Settings},
     upstream::{Upstream, UpstreamBuilder},
 };
@@ -22,18 +24,26 @@ pub struct Application {
 }
 
 impl Application {
-    pub async fn build(settings: Settings, observer: Arc<dyn Observer>) -> Result<Self> {
+    pub async fn build(settings: Settings, observer: Arc<MetricsObserver>) -> Result<Self> {
         let upstreams = build_upstreams(settings.rpcs, settings.rpc_timeout_in_secs);
         let upstream_count = upstreams.len();
 
         let decider = Arc::new(RoundRobin::new(upstreams).context("failed to build decider")?);
+
+        let collector = MetricsCollector::new(observer.clone())
+            .context("failed to build the metrics collector")?;
+
+        let registry = Registry::new();
+        registry
+            .register(Box::new(collector))
+            .context("failed to register the metrics collector")?;
 
         let state = ProxyStateBuilder::new(decider, observer)
             .with_max_attempt(settings.max_attempt)?
             .with_retry_after_in_secs(settings.retry_after_in_secs)
             .build();
 
-        let router = route::build_router(Arc::new(state));
+        let router = route::build_router(Arc::new(state), Arc::new(registry));
 
         let addr = format!(
             "{}:{}",
