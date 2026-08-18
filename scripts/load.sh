@@ -13,6 +13,8 @@ usage: scripts/load.sh [-n requests] [-c concurrency] [-u base_url] [-m method]
 Posts JSON-RPC calls to \$base_url/rpc, then scrapes \$base_url/metrics.
 Start the proxy first: cargo run
 
+needs: oha, jq   (brew install oha jq, or cargo install oha)
+
 defaults: -n $REQUESTS -c $CONCURRENCY -u $BASE_URL -m $METHOD
 EOF
 }
@@ -34,6 +36,13 @@ while getopts ":n:c:u:m:h" opt; do
     esac
 done
 
+for tool in oha jq; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "$tool not found — brew install $tool" >&2
+        exit 1
+    fi
+done
+
 if ! curl -sf -o /dev/null "$BASE_URL/healthz"; then
     echo "no proxy at $BASE_URL — start it with: cargo run" >&2
     exit 1
@@ -44,32 +53,21 @@ trap 'rm -f "$RESULTS"' EXIT
 
 echo "$REQUESTS requests, $CONCURRENCY at a time, $METHOD -> $BASE_URL/rpc"
 
-started=$(date +%s)
-
-seq 1 "$REQUESTS" | xargs -P "$CONCURRENCY" -I{} \
-    curl -s -o /dev/null -w '%{http_code} %{time_total}\n' \
-    -X POST "$BASE_URL/rpc" \
+oha --no-tui --output-format json -o "$RESULTS" \
+    -n "$REQUESTS" -c "$CONCURRENCY" \
+    -m POST \
     -H 'content-type: application/json' \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":{},\"method\":\"$METHOD\",\"params\":[]}" \
-    >"$RESULTS"
-
-elapsed=$(($(date +%s) - started))
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$METHOD\",\"params\":[]}" \
+    "$BASE_URL/rpc"
 
 echo
 echo "--- client ---"
-awk '{ print $2 }' "$RESULTS" | sort -n | awk -v elapsed="$elapsed" '
-    function percentile(fraction,   index_) {
-        index_ = int(NR * fraction) + 1
-        return time[index_ > NR ? NR : index_]
-    }
-    { time[NR] = $1; total += $1 }
-    END {
-        printf "requests   %d in %ds (%.1f req/s)\n", NR, elapsed, NR / (elapsed > 0 ? elapsed : 1)
-        printf "latency    p50 %.3fs  p95 %.3fs  max %.3fs  mean %.3fs\n",
-            percentile(0.50), percentile(0.95), time[NR], total / NR
-    }
-'
-awk '{ print $1 }' "$RESULTS" | sort | uniq -c | awk '{ printf "http %s   %d\n", $2, $1 }'
+jq -r '
+    "requests   \([.statusCodeDistribution[]] | add) in \(.summary.total * 1000 | round / 1000)s (\(.summary.requestsPerSec | round) req/s)",
+    "latency    p50 \(.metrics.latency_ms.p50)ms  p95 \(.metrics.latency_ms.p95)ms  p99 \(.metrics.latency_ms.p99)ms  max \(.metrics.latency_ms.max)ms  mean \(.metrics.latency_ms.mean)ms",
+    (.statusCodeDistribution | to_entries[] | "http \(.key)   \(.value)"),
+    (.errorDistribution | to_entries[] | "error \(.key)   \(.value)")
+' "$RESULTS"
 
 echo
 echo "--- /metrics ---"
