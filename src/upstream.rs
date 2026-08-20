@@ -40,6 +40,16 @@ pub struct Upstream {
     id: UpstreamId,
 }
 
+impl Upstream {
+    fn new(url: String, id: UpstreamId) -> Self {
+        Upstream {
+            http: reqwest::Client::new(),
+            url,
+            id,
+        }
+    }
+}
+
 impl fmt::Debug for Upstream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.id)
