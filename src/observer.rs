@@ -80,6 +80,45 @@ pub struct StatsSnapshot {
     pub duration_micros_total: u64,
 }
 
+pub struct DiffStats {
+    success: u64,
+    unreachable: u64,
+    read_failed: u64,
+    error_status: u64,
+}
+
+impl DiffStats {
+    pub fn error(&self) -> u64 {
+        self.error_status + self.read_failed + self.unreachable
+    }
+    pub fn success(&self) -> u64 {
+        self.success
+    }
+    pub fn total(&self) -> u64 {
+        self.error() + self.success()
+    }
+    pub fn error_rate(&self) -> f64 {
+        let total = self.total();
+        if total == 0 {
+            0.0
+        } else {
+            self.error() as f64 / self.total() as f64
+        }
+    }
+}
+
+impl StatsSnapshot {
+    pub fn diff(&self, base: &Self) -> DiffStats {
+        let d = |f: fn(&Self) -> u64| f(self).saturating_sub(f(base));
+        DiffStats {
+            success: d(|diff| diff.success),
+            unreachable: d(|diff| diff.unreachable),
+            read_failed: d(|diff| diff.read_failed),
+            error_status: d(|diff| diff.error_status),
+        }
+    }
+}
+
 pub struct MetricsObserver {
     stats: HashMap<UpstreamId, Arc<UpstreamStats>>,
 }
@@ -105,6 +144,14 @@ impl MetricsObserver {
             .map(|(upstream_id, stat)| (upstream_id, stat.snapshot()))
             .collect();
         out.sort_unstable_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+        out
+    }
+
+    pub fn snapshot_map(&self) -> HashMap<UpstreamId, StatsSnapshot> {
+        let mut out = HashMap::new();
+        for (upstream_id, stat) in self.stats.iter() {
+            out.insert(upstream_id.clone(), stat.snapshot());
+        }
         out
     }
 }

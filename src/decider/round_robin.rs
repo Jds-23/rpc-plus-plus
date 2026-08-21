@@ -19,6 +19,10 @@ impl Decider for RoundRobin {
         let (head, tail) = self.upstreams.split_at(start);
         tail.iter().chain(head).take(max).cloned().collect()
     }
+
+    fn upstream_len(&self) -> usize {
+        self.upstreams.len()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

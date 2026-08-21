@@ -58,7 +58,7 @@ async fn works_fine_when_one_uptream_works() {
     let a = mock_rpc_server::ok("0xa").await;
     let b = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
     let mut settings = test_settings(vec![rpc("one", a.uri()), rpc("two", b.uri())]);
-    settings.retry_after_in_secs = 0;
+    settings.application.proxy.retry_after_in_secs = 0;
     let addr = spawn_app(settings).await;
 
     let client = reqwest::Client::new();
@@ -86,8 +86,8 @@ async fn non_works_fine_retry_and_propagate_last_error() {
     let a = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
     let b = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
     let mut settings = test_settings(vec![rpc("one", a.uri()), rpc("two", b.uri())]);
-    settings.max_attempt = 2;
-    settings.retry_after_in_secs = 0;
+    settings.application.proxy.max_attempt = 2;
+    settings.application.proxy.retry_after_in_secs = 0;
     let addr = spawn_app(settings).await;
 
     let client = reqwest::Client::new();
@@ -116,8 +116,8 @@ async fn non_works_fine_retry_and_propagate_last_error() {
 async fn single_upstream_is_tried_once() {
     let a = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
     let mut settings = test_settings(vec![rpc("one", a.uri())]);
-    settings.max_attempt = 3;
-    settings.retry_after_in_secs = 3;
+    settings.application.proxy.max_attempt = 3;
+    settings.application.proxy.retry_after_in_secs = 3;
     let addr = spawn_app(settings).await;
 
     let started_at = Instant::now();

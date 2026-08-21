@@ -41,7 +41,7 @@ pub struct Upstream {
 }
 
 impl Upstream {
-    fn new(url: String, id: UpstreamId) -> Self {
+    pub fn new(url: String, id: UpstreamId) -> Self {
         Upstream {
             http: reqwest::Client::new(),
             url,

@@ -1,7 +1,11 @@
 use std::sync::Arc;
 
 use rpc_plus_plus::{
-    observer::MetricsObserver, settings, start_up::Application, telemetry, upstream::UpstreamId,
+    decider::{Decider, round_robin::RoundRobin},
+    observer::MetricsObserver,
+    settings,
+    start_up::{Application, build_upstreams},
+    telemetry,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -11,14 +15,36 @@ async fn main() {
 
     let built = match settings::get_settings() {
         Ok(settings) => {
+            let upstreams = build_upstreams(settings.rpcs, settings.rpc_timeout_in_secs);
+
             let observer = Arc::new(MetricsObserver::new(
-                settings
-                    .rpcs
-                    .iter()
-                    .map(|rpc| UpstreamId::new(rpc.label.as_str())),
+                upstreams.iter().map(|u| u.id().clone()),
             ));
 
-            Application::build(settings, observer).await
+            let decider: Arc<dyn Decider> = match settings.decider.as_str() {
+                "ROUND_ROBIN" => {
+                    match RoundRobin::new(upstreams) {
+                        Err(err) => {
+                            tracing::error!(
+                                event = "startup_failed",
+                                error = format!("decider build failed {err:#}"),
+                            );
+                            std::process::exit(1);
+                        }
+                        Ok(decider) => Arc::new(decider),
+                    }
+                    // Arc::new(RoundRobin::new(upstreams).context("failed to build decider")?)
+                }
+                decider_type => {
+                    tracing::error!(
+                        event = "startup_failed",
+                        error = format!("invalid decider {}", decider_type),
+                    );
+                    std::process::exit(1);
+                }
+            };
+
+            Application::build(settings.application, observer, decider).await
         }
         Err(err) => Err(err),
     };

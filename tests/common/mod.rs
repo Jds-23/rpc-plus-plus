@@ -7,10 +7,11 @@ pub mod mock_rpc_server;
 use std::sync::Arc;
 
 use rpc_plus_plus::{
+    decider::{Decider, round_robin::RoundRobin},
     observer::MetricsObserver,
-    settings::{RpcSettings, Settings},
-    start_up::Application,
-    upstream::UpstreamId,
+    settings::{ApplicationSettings, ProxySettings, RpcSettings, Settings},
+    start_up::{Application, build_upstreams},
+    upstream::{Upstream, UpstreamId},
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -18,11 +19,16 @@ use tokio_util::sync::CancellationToken;
 pub fn test_settings(rpcs: Vec<RpcSettings>) -> Settings {
     Settings {
         rpcs,
-        application_host: "127.0.0.1".to_string(),
-        application_port: 0,
-        max_attempt: 3,
+        application: ApplicationSettings {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            proxy: ProxySettings {
+                max_attempt: 3,
+                retry_after_in_secs: 1,
+            },
+        },
         rpc_timeout_in_secs: 1,
-        retry_after_in_secs: 1,
+        decider: "".to_string(),
     }
 }
 
@@ -39,6 +45,20 @@ pub struct TestApp {
     pub server: JoinHandle<anyhow::Result<()>>,
 }
 
+pub fn upstreams(settings: &Settings) -> Vec<Upstream> {
+    let rpcs: Vec<RpcSettings> = settings
+        .rpcs
+        .iter()
+        .map(|entry| rpc(&entry.label, entry.rpc_url.clone()))
+        .collect();
+
+    build_upstreams(rpcs, settings.rpc_timeout_in_secs)
+}
+
+fn round_robin(settings: &Settings) -> Arc<dyn Decider> {
+    Arc::new(RoundRobin::new(upstreams(settings)).expect("decider build failed"))
+}
+
 pub fn observer_for(settings: &Settings) -> Arc<MetricsObserver> {
     Arc::new(MetricsObserver::new(
         settings
@@ -50,20 +70,34 @@ pub fn observer_for(settings: &Settings) -> Arc<MetricsObserver> {
 
 pub async fn spawn_app_with_handle(settings: Settings) -> TestApp {
     let observer = observer_for(&settings);
-    build_app(settings, observer).await
+    let decider = round_robin(&settings);
+    build_app(settings.application, observer, decider).await
 }
 
 pub async fn spawn_app(settings: Settings) -> String {
-    let observer = observer_for(&settings);
-    build_app(settings, observer).await.addr
+    spawn_app_with_handle(settings).await.addr
 }
 
 pub async fn spawn_app_with_observer(settings: Settings, observer: Arc<MetricsObserver>) -> String {
-    build_app(settings, observer).await.addr
+    let decider = round_robin(&settings);
+    build_app(settings.application, observer, decider)
+        .await
+        .addr
 }
 
-async fn build_app(settings: Settings, observer: Arc<MetricsObserver>) -> TestApp {
-    let app = Application::build(settings, observer)
+pub async fn spawn_app_with_decider(settings: Settings, decider: Arc<dyn Decider>) -> String {
+    let observer = observer_for(&settings);
+    build_app(settings.application, observer, decider)
+        .await
+        .addr
+}
+
+async fn build_app(
+    application: ApplicationSettings,
+    observer: Arc<MetricsObserver>,
+    decider: Arc<dyn Decider>,
+) -> TestApp {
+    let app = Application::build(application, observer, decider)
         .await
         .expect("app build failed");
     let addr = format!("http://127.0.0.1:{}", app.port());

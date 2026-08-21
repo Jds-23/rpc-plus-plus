@@ -10,13 +10,22 @@ const DEFAULT_CONFIG_FILE: &str = "settings.yaml";
 const CONFIG_PATH_ENV: &str = "RPC_CONFIG_PATH";
 
 #[derive(serde::Deserialize)]
-pub struct Settings {
-    pub rpcs: Vec<RpcSettings>,
-    pub application_host: String,
-    pub application_port: u16,
+pub struct ProxySettings {
     pub max_attempt: u64,
-    pub rpc_timeout_in_secs: u64,
     pub retry_after_in_secs: u64,
+}
+#[derive(serde::Deserialize)]
+pub struct ApplicationSettings {
+    pub port: u16,
+    pub host: String,
+    pub proxy: ProxySettings,
+}
+#[derive(serde::Deserialize)]
+pub struct Settings {
+    pub application: ApplicationSettings,
+    pub rpcs: Vec<RpcSettings>,
+    pub rpc_timeout_in_secs: u64,
+    pub decider: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -58,10 +67,11 @@ where
     S: Source + Send + Sync + 'static,
 {
     let mut settings = Config::builder()
-        .set_default("application_host", "127.0.0.1")?
-        .set_default("max_attempt", 3)?
+        .set_default("application.host", "127.0.0.1")?
+        .set_default("application.proxy.max_attempt", 3)?
+        .set_default("application.proxy.retry_after_in_secs", 1)?
         .set_default("rpc_timeout_in_secs", 3)?
-        .set_default("retry_after_in_secs", 1)?
+        .set_default("decider", "ROUND_ROBIN")?
         .add_source(source)
         .build()?
         .try_deserialize::<Settings>()
@@ -77,7 +87,7 @@ fn expand_env(
     settings: &mut Settings,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Result<(), SettingsError> {
-    settings.application_host = expand_str(&settings.application_host, get)?;
+    settings.application.host = expand_str(&settings.application.host, get)?;
 
     for rpc in &mut settings.rpcs {
         rpc.label = expand_str(&rpc.label, get)?;
@@ -160,10 +170,11 @@ mod tests {
 
     /// Only the two required keys, so every optional falls through to its default.
     const MINIMAL: &str = r#"
-application_port: 8080
 rpcs:
   - label: one
     rpc_url: http://127.0.0.1:9001
+application:
+  port: 8080
 "#;
 
     fn parse(yaml: &str) -> Result<Settings> {
@@ -189,10 +200,11 @@ rpcs:
     }
 
     fn rpcs(entries: &[(&str, &str)]) -> String {
-        let mut yaml = String::from("application_port: 8080\nrpcs:\n");
+        let mut yaml = String::from("rpcs:\n");
         for (label, url) in entries {
             yaml.push_str(&format!("  - label: {label}\n    rpc_url: {url}\n"));
         }
+        yaml.push_str("application:\n  port: 8080\n");
         yaml
     }
 
@@ -200,39 +212,39 @@ rpcs:
     fn optional_fields_fall_back_to_their_defaults() {
         let settings = parse(MINIMAL).expect("the minimal config should load");
 
-        assert_eq!(settings.application_host, "127.0.0.1");
-        assert_eq!(settings.max_attempt, 3);
+        assert_eq!(settings.application.host, "127.0.0.1");
+        assert_eq!(settings.application.proxy.max_attempt, 3);
         assert_eq!(settings.rpc_timeout_in_secs, 3);
-        assert_eq!(settings.retry_after_in_secs, 1);
+        assert_eq!(settings.application.proxy.retry_after_in_secs, 1);
     }
 
     /// The default must not be sticky: a container has to be able to widen it.
     #[test]
     fn an_explicit_host_overrides_the_loopback_default() {
-        let yaml = format!("{MINIMAL}application_host: 0.0.0.0\n");
+        let yaml = format!("{MINIMAL}  host: 0.0.0.0\n");
         let settings = parse(&yaml).expect("the config should load");
 
-        assert_eq!(settings.application_host, "0.0.0.0");
+        assert_eq!(settings.application.host, "0.0.0.0");
     }
 
     #[test]
     fn a_missing_port_is_an_error() {
         let yaml = "rpcs:\n  - label: one\n    rpc_url: http://127.0.0.1:9001\n";
 
-        assert!(parse(yaml).is_err(), "application_port has no default");
+        assert!(parse(yaml).is_err(), "application.port has no default");
     }
 
     #[test]
     fn missing_upstreams_are_an_error() {
         assert!(
-            parse("application_port: 8080\n").is_err(),
+            parse("application:\n  port: 8080\n").is_err(),
             "rpcs has no default"
         );
     }
 
     #[test]
     fn an_empty_upstream_list_is_an_error() {
-        let error = error_of("application_port: 8080\nrpcs: []\n", &[]);
+        let error = error_of("application:\n  port: 8080\nrpcs: []\n", &[]);
 
         assert!(error.contains("rpcs must not be empty"), "{error}");
     }
@@ -252,7 +264,7 @@ rpcs:
     #[test]
     fn every_string_field_is_expanded() {
         let yaml = format!(
-            "{}application_host: ${{HOST}}\n",
+            "{}  host: ${{HOST}}\n",
             rpcs(&[("${NAME}", "https://provider.example/${A}/${B}")])
         );
         let settings = parse_with_env(
@@ -266,7 +278,7 @@ rpcs:
         )
         .expect("the config should load");
 
-        assert_eq!(settings.application_host, "0.0.0.0");
+        assert_eq!(settings.application.host, "0.0.0.0");
         assert_eq!(settings.rpcs[0].label, "alchemy");
         assert_eq!(settings.rpcs[0].rpc_url, "https://provider.example/v2/key");
     }

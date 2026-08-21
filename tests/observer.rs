@@ -19,8 +19,8 @@ const DEAD_URL: &str = "http://127.0.0.1:1";
 /// sleep between attempts.
 fn settings(rpcs: Vec<RpcSettings>) -> Settings {
     let mut settings = test_settings(rpcs);
-    settings.max_attempt = settings.rpcs.len() as u64;
-    settings.retry_after_in_secs = 0;
+    settings.application.proxy.max_attempt = settings.rpcs.len() as u64;
+    settings.application.proxy.retry_after_in_secs = 0;
     settings
 }
 
