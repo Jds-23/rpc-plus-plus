@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+arc-swap = "1.9.2"
 axum = "0.8.9"
 config = "0.15.25"
 http-body-util = "0.1.4"
