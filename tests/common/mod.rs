@@ -125,7 +125,7 @@ async fn build_app(
     observer: Arc<MetricsObserver>,
     decider: Arc<dyn Decider>,
 ) -> TestApp {
-    let app = Application::build(application, observer, decider)
+    let app = Application::build(application, observer, decider, JoinSet::new())
         .await
         .expect("app build failed");
     let addr = format!("http://127.0.0.1:{}", app.port());

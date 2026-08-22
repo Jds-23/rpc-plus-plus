@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use arc_swap::ArcSwap;
@@ -16,21 +16,11 @@ use crate::{
 
 //
 //
-// 1. @todo `PREFER_LEAST_ERRORS` arm in `src/main.rs:24`. Needs the `CancellationToken`
-//    hoisted above the decider build — `spawn` takes it at construction, while
-//    `main.rs` creates it after `Application::build`. Pass `window` 4: 60s over a
-//    15s tick.
-// 2. @todo Somewhere for the refresher to live. `Application::tasks` (`src/start_up.rs`)
-//    is declared and drained on shutdown, but never filled.
 // 3. @todo `rank` on `attempt_started` (`src/proxy.rs`) — the 0-indexed chain position,
 //    so first-choice hit rate is one filter rather than a join.
-// 4. @todo `decider_selected`, `ranking_rebuilt`, `ranking_window_incomplete`. This
-//    module emits nothing. `ranking_rebuilt` is info only when the order changed
-//    and debug otherwise; `ranking_window_incomplete` fires while
-//    `baseline.len() < window_ticks`.
-// 5. @todo `refresh`, `window_ticks`, `min_samples` and `margin` as settings
+// 4. @todo `refresh`, `window_ticks`, `min_samples` and `margin` as settings
 //    (`src/settings.rs`) rather than parameters and constants.
-// 6. @todo JSON-RPC errors riding on HTTP 200 count as successes (`src/observer.rs`), so
+// 5. @todo JSON-RPC errors riding on HTTP 200 count as successes (`src/observer.rs`), so
 //    a `-32005` rate limit reads here as perfect health.
 
 pub struct Cached {
@@ -41,16 +31,6 @@ pub struct PreferLeastError {
     cached: ArcSwap<Cached>,
 }
 
-// PreferLeastError::spawn(_params_, tasks: JoinSet())
-//     builds object
-//     spawns the refresher
-//     sets initial ranking
-// refresher::run()
-//     check for epoch ticks
-//     checks diff from the last epoch
-//     scores
-//     reorders
-//     published
 struct RankingRefresher {
     metrics_observer: Arc<MetricsObserver>,
     baseline: VecDeque<HashMap<UpstreamId, StatsSnapshot>>,
@@ -75,12 +55,25 @@ impl RankingRefresher {
     }
 
     pub fn refresh(&mut self) {
+        let started = Instant::now();
         let current: HashMap<UpstreamId, StatsSnapshot> = self.metrics_observer.snapshot_map();
         let baseline = self
             .baseline
             .front()
             .expect("seeded at construction and trimmed only after a push");
         let ranked = self.decider.cached.load_full();
+
+        // The front snapshot is one tick old per entry held, so the deque's depth
+        // is the span this diff covers.
+        let window_secs = self.baseline.len() as u64 * self.interval.as_secs();
+        let want_secs = self.window_ticks as u64 * self.interval.as_secs();
+        if self.baseline.len() < self.window_ticks {
+            tracing::warn!(
+                event = "ranking_window_incomplete",
+                have_secs = window_secs,
+                want_secs,
+            );
+        }
 
         let incumbent = ranked.ranking.first().map(|upstream| upstream.id());
 
@@ -90,8 +83,14 @@ impl RankingRefresher {
             .map(|upstream| {
                 let id = upstream.id();
                 // `spawn` refuses an upstream the observer does not track, and the
-                // observer's key set is fixed at construction, so both maps hold it.
-                let window = current[id].diff(&baseline[id]);
+                let Some(window) = current
+                    .get(id)
+                    .zip(baseline.get(id))
+                    .map(|(current, baseline)| current.diff(baseline))
+                else {
+                    tracing::warn!(event = "ranking_upstream_missing", upstream = %id);
+                    return (upstream.clone(), SortKey::unscored());
+                };
 
                 let key = if window.total() < self.min_samples {
                     // A starved upstream rates a perfect 0.0, which would unseat a
@@ -108,6 +107,19 @@ impl RankingRefresher {
             .collect();
 
         ranking.sort_by(|(_, a), (_, b)| a.cmp(b));
+
+        let order: Vec<&str> = ranking
+            .iter()
+            .map(|(upstream, _)| upstream.id().as_str())
+            .collect();
+        let scores: Vec<String> = ranking.iter().map(|(_, key)| key.render()).collect();
+        tracing::info!(
+            event = "ranking_rebuilt",
+            order = ?order,
+            scores = ?scores,
+            window_secs,
+            duration_us = started.elapsed().as_micros() as u64,
+        );
 
         self.decider.cached.store(Arc::new(Cached {
             ranking: ranking.into_iter().map(|(upstream, _)| upstream).collect(),
@@ -173,6 +185,8 @@ impl PreferLeastError {
 
 pub const REFRESH_DEFAULT: Duration = Duration::from_secs(15);
 
+pub const WINDOW_DEFAULT: usize = 4;
+
 /// A window carrying fewer calls than this is noise, not signal.
 const MIN_WINDOW_SAMPLES: u64 = 20;
 
@@ -197,6 +211,14 @@ impl SortKey {
         SortKey {
             unscored: true,
             error_rate: 0.0,
+        }
+    }
+
+    fn render(&self) -> String {
+        if self.unscored {
+            "unscored".to_string()
+        } else {
+            format!("{:.4}", self.error_rate)
         }
     }
 

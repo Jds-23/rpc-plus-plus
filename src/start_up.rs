@@ -27,6 +27,7 @@ impl Application {
         application_settings: ApplicationSettings,
         observer: Arc<MetricsObserver>,
         decider: Arc<dyn Decider>,
+        tasks: JoinSet<()>,
     ) -> Result<Self> {
         let collector = MetricsCollector::new(observer.clone())
             .context("failed to build the metrics collector")?;
@@ -64,7 +65,7 @@ impl Application {
             listener,
             router,
             port,
-            tasks: JoinSet::new(),
+            tasks,
         })
     }
 
