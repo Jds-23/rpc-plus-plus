@@ -11,15 +11,15 @@ application:
   proxy:
     max_attempt: 3
     retry_after_in_secs: 1
+    rpc_timeout_in_secs: 3
 
-rpcs:
+upstreams:
   - label: alchemy
-    rpc_url: https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_KEY}
+    url: https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_KEY}
   - label: drpc
-    rpc_url: https://eth.drpc.org
+    url: https://eth.drpc.org
   - label: blockrazor
-    rpc_url: https://eth.blockrazor.xyz
+    url: https://eth.blockrazor.xyz
 
-# Optional, shown with their defaults.
-rpc_timeout_in_secs: 3
+# Optional, shown with its default.
 decider: ROUND_ROBIN

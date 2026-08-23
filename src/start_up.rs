@@ -7,6 +7,7 @@ use tokio::{net::TcpListener, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    config::{ApplicationSettings, DeciderKind, UpstreamSettings},
     decider::{
         Decider,
         prefer_least_errors::{self, PreferLeastErrors},
@@ -15,7 +16,6 @@ use crate::{
     observer::MetricsObserver,
     proxy::ProxyStateBuilder,
     route::{self, metrics::MetricsCollector},
-    settings::{ApplicationSettings, DeciderKind, RpcSettings},
     upstream::{Upstream, UpstreamBuilder},
 };
 
@@ -119,13 +119,14 @@ pub fn build_decider(
     Ok(decider)
 }
 
-pub fn build_upstreams<I>(rpcs: I, rpc_timeout_in_secs: u64) -> Vec<Upstream>
+pub fn build_upstreams<I>(upstreams: I, rpc_timeout_in_secs: u64) -> Vec<Upstream>
 where
-    I: IntoIterator<Item = RpcSettings>,
+    I: IntoIterator<Item = UpstreamSettings>,
 {
-    rpcs.into_iter()
+    upstreams
+        .into_iter()
         .filter_map(|item| {
-            UpstreamBuilder::new(&item.label, &item.rpc_url)
+            UpstreamBuilder::new(&item.label, &item.url)
                 .and_then(|builder| {
                     builder
                         .with_rpc_timeout_in_secs(rpc_timeout_in_secs)

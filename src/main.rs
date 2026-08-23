@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use rpc_plus_plus::{
+    config,
     observer::MetricsObserver,
-    settings,
     start_up::{Application, build_decider, build_upstreams},
     telemetry,
 };
@@ -32,10 +32,13 @@ async fn main() {
 }
 
 async fn build(shutdown: &CancellationToken) -> Result<Application> {
-    let settings = settings::get_settings()?;
+    let settings = config::get_settings()?;
     let mut tasks = JoinSet::new();
 
-    let upstreams = build_upstreams(settings.rpcs, settings.rpc_timeout_in_secs);
+    let upstreams = build_upstreams(
+        settings.upstreams,
+        settings.application.proxy.rpc_timeout_in_secs,
+    );
     let observer = Arc::new(MetricsObserver::new(
         upstreams.iter().map(|upstream| upstream.id().clone()),
     ));

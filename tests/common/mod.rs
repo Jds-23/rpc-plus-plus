@@ -7,35 +7,36 @@ pub mod mock_rpc_server;
 use std::{sync::Arc, time::Duration};
 
 use rpc_plus_plus::{
+    config::{ApplicationSettings, DeciderKind, ProxySettings, Settings, UpstreamSettings},
     decider::{Decider, prefer_least_errors::PreferLeastErrors, round_robin::RoundRobin},
     observer::MetricsObserver,
-    settings::{ApplicationSettings, DeciderKind, ProxySettings, RpcSettings, Settings},
     start_up::{Application, build_upstreams},
     upstream::{Upstream, UpstreamId},
 };
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-pub fn test_settings(rpcs: Vec<RpcSettings>) -> Settings {
+pub fn test_settings(upstreams: Vec<UpstreamSettings>) -> Settings {
     Settings {
-        rpcs,
+        upstreams,
         application: ApplicationSettings {
             host: "127.0.0.1".to_string(),
             port: 0,
             proxy: ProxySettings {
                 max_attempt: 3,
                 retry_after_in_secs: 1,
+                rpc_timeout_in_secs: 1,
             },
         },
-        rpc_timeout_in_secs: 1,
+        legacy_rpc_timeout_in_secs: None,
         decider: DeciderKind::RoundRobin,
     }
 }
 
-pub fn rpc(label: &str, rpc_url: impl Into<String>) -> RpcSettings {
-    RpcSettings {
+pub fn rpc(label: &str, url: impl Into<String>) -> UpstreamSettings {
+    UpstreamSettings {
         label: label.to_string(),
-        rpc_url: rpc_url.into(),
+        url: url.into(),
     }
 }
 
@@ -46,13 +47,13 @@ pub struct TestApp {
 }
 
 pub fn upstreams(settings: &Settings) -> Vec<Upstream> {
-    let rpcs: Vec<RpcSettings> = settings
-        .rpcs
+    let upstreams: Vec<UpstreamSettings> = settings
+        .upstreams
         .iter()
-        .map(|entry| rpc(&entry.label, entry.rpc_url.clone()))
+        .map(|entry| rpc(&entry.label, entry.url.clone()))
         .collect();
 
-    build_upstreams(rpcs, settings.rpc_timeout_in_secs)
+    build_upstreams(upstreams, settings.application.proxy.rpc_timeout_in_secs)
 }
 
 fn round_robin(settings: &Settings) -> Arc<dyn Decider> {
@@ -83,7 +84,7 @@ pub fn prefer_least_errors(
 pub fn observer_for(settings: &Settings) -> Arc<MetricsObserver> {
     Arc::new(MetricsObserver::new(
         settings
-            .rpcs
+            .upstreams
             .iter()
             .map(|rpc| UpstreamId::new(rpc.label.as_str())),
     ))

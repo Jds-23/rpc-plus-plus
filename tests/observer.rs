@@ -2,8 +2,8 @@ use std::{sync::Arc, time::Instant};
 
 use reqwest::StatusCode;
 use rpc_plus_plus::{
+    config::{Settings, UpstreamSettings},
     observer::MetricsObserver,
-    settings::{RpcSettings, Settings},
     upstream::UpstreamId,
 };
 use serde_json::json;
@@ -17,9 +17,9 @@ const DEAD_URL: &str = "http://127.0.0.1:1";
 
 /// Every upstream gets a turn, and `retry_after` is zeroed so the loop does not
 /// sleep between attempts.
-fn settings(rpcs: Vec<RpcSettings>) -> Settings {
-    let mut settings = test_settings(rpcs);
-    settings.application.proxy.max_attempt = settings.rpcs.len() as u64;
+fn settings(upstreams: Vec<UpstreamSettings>) -> Settings {
+    let mut settings = test_settings(upstreams);
+    settings.application.proxy.max_attempt = settings.upstreams.len() as u64;
     settings.application.proxy.retry_after_in_secs = 0;
     settings
 }
