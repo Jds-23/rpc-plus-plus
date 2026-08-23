@@ -13,7 +13,6 @@ use rpc_plus_plus::{
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
 
 #[tokio::main]
 async fn main() {
