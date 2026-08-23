@@ -30,10 +30,7 @@ async fn main() {
             let decider: Arc<dyn Decider> = match settings.decider.as_str() {
                 "ROUND_ROBIN" => match RoundRobin::new(upstreams) {
                     Ok(decider) => {
-                        tracing::info!(
-                            event = "decider_selected",
-                            decider = format!("ROUND_ROBIN")
-                        );
+                        tracing::info!(event = "decider_selected", decider = "ROUND_ROBIN");
                         Arc::new(decider)
                     }
                     Err(err) => startup_failed(format!("decider build failed {err:#}")),
@@ -47,10 +44,7 @@ async fn main() {
                     WINDOW_DEFAULT,
                 ) {
                     Ok(decider) => {
-                        tracing::info!(
-                            event = "decider_selected",
-                            decider = format!("PREFER_LEAST_ERRORS")
-                        );
+                        tracing::info!(event = "decider_selected", decider = "PREFER_LEAST_ERRORS");
                         decider
                     }
                     Err(err) => startup_failed(format!("decider build failed {err:#}")),
