@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::upstream::Upstream;
 
-pub mod prefer_least_error;
+pub mod prefer_least_errors;
 pub mod round_robin;
 
 pub trait Decider: Send + Sync + 'static {

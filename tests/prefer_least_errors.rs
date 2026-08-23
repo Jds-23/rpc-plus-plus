@@ -7,7 +7,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::{
-    mock_rpc_server, observer_for, prefer_least_error, rpc, spawn_app_with_observer_and_decider,
+    mock_rpc_server, observer_for, prefer_least_errors, rpc, spawn_app_with_observer_and_decider,
     test_settings,
 };
 
@@ -28,7 +28,7 @@ async fn the_decider_scores_from_the_observer_the_proxy_writes_to() {
     let shutdown = CancellationToken::new();
     let mut tasks = JoinSet::new();
 
-    let decider = prefer_least_error(
+    let decider = prefer_least_errors(
         &settings,
         observer.clone(),
         &mut tasks,

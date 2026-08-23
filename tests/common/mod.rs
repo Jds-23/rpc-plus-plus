@@ -7,9 +7,9 @@ pub mod mock_rpc_server;
 use std::{sync::Arc, time::Duration};
 
 use rpc_plus_plus::{
-    decider::{Decider, prefer_least_error::PreferLeastError, round_robin::RoundRobin},
+    decider::{Decider, prefer_least_errors::PreferLeastErrors, round_robin::RoundRobin},
     observer::MetricsObserver,
-    settings::{ApplicationSettings, ProxySettings, RpcSettings, Settings},
+    settings::{ApplicationSettings, DeciderKind, ProxySettings, RpcSettings, Settings},
     start_up::{Application, build_upstreams},
     upstream::{Upstream, UpstreamId},
 };
@@ -28,7 +28,7 @@ pub fn test_settings(rpcs: Vec<RpcSettings>) -> Settings {
             },
         },
         rpc_timeout_in_secs: 1,
-        decider: "".to_string(),
+        decider: DeciderKind::RoundRobin,
     }
 }
 
@@ -61,7 +61,7 @@ fn round_robin(settings: &Settings) -> Arc<dyn Decider> {
 
 /// Dropping a `JoinSet` aborts its tasks, so the refresher lives exactly as long
 /// as the caller's `tasks`.
-pub fn prefer_least_error(
+pub fn prefer_least_errors(
     settings: &Settings,
     observer: Arc<MetricsObserver>,
     tasks: &mut JoinSet<()>,
@@ -69,7 +69,7 @@ pub fn prefer_least_error(
     refresh: Duration,
     window: usize,
 ) -> Arc<dyn Decider> {
-    PreferLeastError::spawn(
+    PreferLeastErrors::spawn(
         upstreams(settings),
         observer,
         tasks,

@@ -26,18 +26,16 @@ impl Decider for RoundRobin {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RoundRobinBuildError {
+pub enum BuildError {
     #[error("upstreams must not be empty")]
     EmptyUpstreams,
 }
 
 impl RoundRobin {
-    pub fn new(
-        upstreams: impl IntoIterator<Item = Upstream>,
-    ) -> Result<Self, RoundRobinBuildError> {
+    pub fn new(upstreams: impl IntoIterator<Item = Upstream>) -> Result<Self, BuildError> {
         let upstreams: Vec<Arc<Upstream>> = upstreams.into_iter().map(Arc::new).collect();
         if upstreams.is_empty() {
-            return Err(RoundRobinBuildError::EmptyUpstreams);
+            return Err(BuildError::EmptyUpstreams);
         }
         Ok(RoundRobin {
             upstreams,

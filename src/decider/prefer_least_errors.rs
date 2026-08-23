@@ -14,27 +14,38 @@ use crate::{
     upstream::{Upstream, UpstreamId},
 };
 
+// Known gaps, carried in docs/design/v0.2-DECIDER.md under Known Bugs:
 //
-//
-// 3. @todo `rank` on `attempt_started` (`src/proxy.rs`) — the 0-indexed chain position,
-//    so first-choice hit rate is one filter rather than a join.
-// 4. @todo `refresh`, `window_ticks`, `min_samples` and `margin` as settings
-//    (`src/settings.rs`) rather than parameters and constants.
-// 5. @todo JSON-RPC errors riding on HTTP 200 count as successes (`src/observer.rs`), so
-//    a `-32005` rate limit reads here as perfect health.
+// - `rank` on `attempt_started` (`src/proxy.rs`) — the 0-indexed chain position, so
+//   first-choice hit rate is one filter rather than a join.
+// - `refresh`, `window_ticks`, `min_samples` and `margin` belong in settings
+//   (`src/settings.rs`) rather than in parameters and constants.
+// - JSON-RPC errors riding on HTTP 200 count as successes (`src/observer.rs`), so a
+//   `-32005` rate limit reads here as perfect health.
 
-pub struct Cached {
-    ranking: Vec<Arc<Upstream>>,
+pub const REFRESH_DEFAULT: Duration = Duration::from_secs(15);
+
+pub const WINDOW_DEFAULT: usize = 4;
+
+/// A window carrying fewer calls than this is noise, not signal.
+const MIN_WINDOW_SAMPLES: u64 = 20;
+
+/// A challenger has to be 20% better than the incumbent head to take its place.
+const PROMOTION_MARGIN: f64 = 0.8;
+
+/// The order `decide` hands out, best first.
+pub struct Ranking {
+    upstreams: Vec<Arc<Upstream>>,
 }
 
-pub struct PreferLeastError {
-    cached: ArcSwap<Cached>,
+pub struct PreferLeastErrors {
+    ranking: ArcSwap<Ranking>,
 }
 
 struct RankingRefresher {
     metrics_observer: Arc<MetricsObserver>,
     baseline: VecDeque<HashMap<UpstreamId, StatsSnapshot>>,
-    decider: Arc<PreferLeastError>,
+    decider: Arc<PreferLeastErrors>,
     interval: Duration,
     window_ticks: usize,
     min_samples: u64,
@@ -61,7 +72,7 @@ impl RankingRefresher {
             .baseline
             .front()
             .expect("seeded at construction and trimmed only after a push");
-        let ranked = self.decider.cached.load_full();
+        let current_ranking = self.decider.ranking.load_full();
 
         // The front snapshot is one tick old per entry held, so the deque's depth
         // is the span this diff covers.
@@ -75,10 +86,13 @@ impl RankingRefresher {
             );
         }
 
-        let incumbent = ranked.ranking.first().map(|upstream| upstream.id());
+        let incumbent = current_ranking
+            .upstreams
+            .first()
+            .map(|upstream| upstream.id());
 
-        let mut ranking: Vec<(Arc<Upstream>, SortKey)> = ranked
-            .ranking
+        let mut scored: Vec<(Arc<Upstream>, SortKey)> = current_ranking
+            .upstreams
             .iter()
             .map(|upstream| {
                 let id = upstream.id();
@@ -106,13 +120,13 @@ impl RankingRefresher {
             })
             .collect();
 
-        ranking.sort_by(|(_, a), (_, b)| a.cmp(b));
+        scored.sort_by(|(_, a), (_, b)| a.cmp(b));
 
-        let order: Vec<&str> = ranking
+        let order: Vec<&str> = scored
             .iter()
             .map(|(upstream, _)| upstream.id().as_str())
             .collect();
-        let scores: Vec<String> = ranking.iter().map(|(_, key)| key.render()).collect();
+        let scores: Vec<String> = scored.iter().map(|(_, key)| key.render()).collect();
         tracing::info!(
             event = "ranking_rebuilt",
             order = ?order,
@@ -121,8 +135,8 @@ impl RankingRefresher {
             duration_us = started.elapsed().as_micros() as u64,
         );
 
-        self.decider.cached.store(Arc::new(Cached {
-            ranking: ranking.into_iter().map(|(upstream, _)| upstream).collect(),
+        self.decider.ranking.store(Arc::new(Ranking {
+            upstreams: scored.into_iter().map(|(upstream, _)| upstream).collect(),
         }));
         self.baseline.push_back(current);
         if self.baseline.len() > self.window_ticks {
@@ -132,7 +146,7 @@ impl RankingRefresher {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum PreferLeastErrorBuildError {
+pub enum BuildError {
     #[error("upstream must not be empty")]
     EmptyUpstreams,
     #[error("upstream {0} is not tracked by the observer")]
@@ -141,7 +155,7 @@ pub enum PreferLeastErrorBuildError {
     ZeroWindow,
 }
 
-impl PreferLeastError {
+impl PreferLeastErrors {
     pub fn spawn(
         upstreams: impl IntoIterator<Item = Upstream>,
         metrics_observer: Arc<MetricsObserver>,
@@ -149,24 +163,21 @@ impl PreferLeastError {
         shutdown: CancellationToken,
         refresh: Duration,
         window: usize,
-    ) -> Result<Arc<Self>, PreferLeastErrorBuildError> {
+    ) -> Result<Arc<Self>, BuildError> {
         let upstreams: Vec<Arc<Upstream>> = upstreams.into_iter().map(Arc::new).collect();
         if upstreams.is_empty() {
-            return Err(PreferLeastErrorBuildError::EmptyUpstreams);
+            return Err(BuildError::EmptyUpstreams);
         }
         if window.eq(&0) {
-            return Err(PreferLeastErrorBuildError::ZeroWindow);
+            return Err(BuildError::ZeroWindow);
         }
         for upstream in &upstreams {
             if metrics_observer.snapshot(upstream.id()).is_none() {
-                return Err(PreferLeastErrorBuildError::UnknownUpstream(
-                    upstream.id().clone(),
-                ));
+                return Err(BuildError::UnknownUpstream(upstream.id().clone()));
             }
         }
-        let cached = Arc::new(Cached { ranking: upstreams });
-        let decider = Arc::new(PreferLeastError {
-            cached: ArcSwap::new(cached),
+        let decider = Arc::new(PreferLeastErrors {
+            ranking: ArcSwap::from_pointee(Ranking { upstreams }),
         });
         let ranking_refresher = RankingRefresher {
             baseline: VecDeque::from([metrics_observer.snapshot_map()]),
@@ -182,16 +193,6 @@ impl PreferLeastError {
         Ok(decider)
     }
 }
-
-pub const REFRESH_DEFAULT: Duration = Duration::from_secs(15);
-
-pub const WINDOW_DEFAULT: usize = 4;
-
-/// A window carrying fewer calls than this is noise, not signal.
-const MIN_WINDOW_SAMPLES: u64 = 20;
-
-/// A challenger has to be 20% better than the incumbent head to take its place.
-const PROMOTION_MARGIN: f64 = 0.8;
 
 #[derive(PartialEq)]
 struct SortKey {
@@ -229,14 +230,14 @@ impl SortKey {
     }
 }
 
-impl Decider for PreferLeastError {
+impl Decider for PreferLeastErrors {
     fn decide(&self, max: usize) -> Vec<Arc<Upstream>> {
-        let cache = self.cached.load();
-        cache.ranking.iter().take(max).cloned().collect()
+        let ranking = self.ranking.load();
+        ranking.upstreams.iter().take(max).cloned().collect()
     }
 
     fn upstream_len(&self) -> usize {
-        self.cached.load().ranking.len()
+        self.ranking.load().upstreams.len()
     }
 }
 
@@ -260,7 +261,7 @@ mod tests {
         labels: &[&str],
     ) -> (
         RankingRefresher,
-        Arc<PreferLeastError>,
+        Arc<PreferLeastErrors>,
         Arc<MetricsObserver>,
     ) {
         harness_windowed(labels, 1)
@@ -271,13 +272,13 @@ mod tests {
         window_ticks: usize,
     ) -> (
         RankingRefresher,
-        Arc<PreferLeastError>,
+        Arc<PreferLeastErrors>,
         Arc<MetricsObserver>,
     ) {
         let observer = Arc::new(MetricsObserver::new(
             labels.iter().map(|label| UpstreamId::new(*label)),
         ));
-        let ranking = labels
+        let upstreams = labels
             .iter()
             .map(|label| {
                 Arc::new(Upstream::new(
@@ -286,8 +287,8 @@ mod tests {
                 ))
             })
             .collect();
-        let decider = Arc::new(PreferLeastError {
-            cached: ArcSwap::new(Arc::new(Cached { ranking })),
+        let decider = Arc::new(PreferLeastErrors {
+            ranking: ArcSwap::from_pointee(Ranking { upstreams }),
         });
         let refresher = RankingRefresher {
             metrics_observer: observer.clone(),
@@ -326,7 +327,7 @@ mod tests {
         }
     }
 
-    fn order(decider: &PreferLeastError) -> Vec<String> {
+    fn order(decider: &PreferLeastErrors) -> Vec<String> {
         decider
             .decide(usize::MAX)
             .iter()
@@ -489,7 +490,7 @@ mod tests {
             vec![Upstream::new("url".to_string(), UpstreamId::new("label"))];
         let metrics_observer = Arc::new(MetricsObserver::new(vec![UpstreamId::new("label")]));
         let shutdown = CancellationToken::new();
-        let _decider = PreferLeastError::spawn(
+        let _decider = PreferLeastErrors::spawn(
             upstreams,
             metrics_observer,
             &mut tasks,
@@ -507,7 +508,7 @@ mod tests {
         let mut tasks: JoinSet<()> = JoinSet::new();
         let observer = Arc::new(MetricsObserver::new(vec![]));
 
-        let built = PreferLeastError::spawn(
+        let built = PreferLeastErrors::spawn(
             Vec::new(),
             observer,
             &mut tasks,
@@ -516,10 +517,7 @@ mod tests {
             1,
         );
 
-        assert!(matches!(
-            built,
-            Err(PreferLeastErrorBuildError::EmptyUpstreams)
-        ));
+        assert!(matches!(built, Err(BuildError::EmptyUpstreams)));
         assert_eq!(tasks.len(), 0, "a rejected build should spawn nothing");
     }
 
@@ -529,7 +527,7 @@ mod tests {
         let observer = Arc::new(MetricsObserver::new(vec![UpstreamId::new("one")]));
         let upstreams = vec![Upstream::new("url".to_string(), UpstreamId::new("one"))];
 
-        let built = PreferLeastError::spawn(
+        let built = PreferLeastErrors::spawn(
             upstreams,
             observer,
             &mut tasks,
@@ -538,7 +536,7 @@ mod tests {
             0,
         );
 
-        assert!(matches!(built, Err(PreferLeastErrorBuildError::ZeroWindow)));
+        assert!(matches!(built, Err(BuildError::ZeroWindow)));
         assert_eq!(tasks.len(), 0, "a rejected build should spawn nothing");
     }
 
@@ -552,7 +550,7 @@ mod tests {
             Upstream::new("url".to_string(), UpstreamId::new("stranger")),
         ];
 
-        let built = PreferLeastError::spawn(
+        let built = PreferLeastErrors::spawn(
             upstreams,
             observer,
             &mut tasks,
@@ -562,7 +560,7 @@ mod tests {
         );
 
         match built {
-            Err(PreferLeastErrorBuildError::UnknownUpstream(id)) => {
+            Err(BuildError::UnknownUpstream(id)) => {
                 assert_eq!(id.as_str(), "stranger")
             }
             Err(other) => panic!("expected UnknownUpstream, got {other:?}"),

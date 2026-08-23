@@ -25,7 +25,27 @@ pub struct Settings {
     pub application: ApplicationSettings,
     pub rpcs: Vec<RpcSettings>,
     pub rpc_timeout_in_secs: u64,
-    pub decider: String,
+    pub decider: DeciderKind,
+}
+
+/// Which decider `main` builds. Deserialising as an enum rather than a `String`
+/// means an unrecognised value is rejected while the config is read, next to every
+/// other config error, rather than by a `match` arm further down startup.
+#[derive(serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DeciderKind {
+    RoundRobin,
+    PreferLeastErrors,
+}
+
+impl DeciderKind {
+    /// The configured spelling, for the `decider_selected` log line.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeciderKind::RoundRobin => "ROUND_ROBIN",
+            DeciderKind::PreferLeastErrors => "PREFER_LEAST_ERRORS",
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -216,6 +236,27 @@ application:
         assert_eq!(settings.application.proxy.max_attempt, 3);
         assert_eq!(settings.rpc_timeout_in_secs, 3);
         assert_eq!(settings.application.proxy.retry_after_in_secs, 1);
+        assert_eq!(settings.decider, DeciderKind::RoundRobin);
+    }
+
+    #[test]
+    fn the_decider_is_read_by_its_configured_spelling() {
+        let yaml = format!("{MINIMAL}decider: PREFER_LEAST_ERRORS\n");
+        let settings = parse(&yaml).expect("the config should load");
+
+        assert_eq!(settings.decider, DeciderKind::PreferLeastErrors);
+    }
+
+    /// The value reaches a `match` at startup, so a typo has to be caught while the
+    /// config is read rather than after the listener is half built. `config` writes
+    /// its own message here and does not list the valid variants, so the assertion
+    /// is on the key and the offending value.
+    #[test]
+    fn an_unrecognised_decider_is_rejected_by_name() {
+        let error = error_of(&format!("{MINIMAL}decider: LEAST_LATENCY\n"), &[]);
+
+        assert!(error.contains("LEAST_LATENCY"), "{error}");
+        assert!(error.contains("decider"), "{error}");
     }
 
     /// The default must not be sticky: a container has to be able to widen it.

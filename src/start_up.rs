@@ -7,11 +7,15 @@ use tokio::{net::TcpListener, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    decider::Decider,
+    decider::{
+        Decider,
+        prefer_least_errors::{self, PreferLeastErrors},
+        round_robin::RoundRobin,
+    },
     observer::MetricsObserver,
     proxy::ProxyStateBuilder,
     route::{self, metrics::MetricsCollector},
-    settings::{ApplicationSettings, RpcSettings},
+    settings::{ApplicationSettings, DeciderKind, RpcSettings},
     upstream::{Upstream, UpstreamBuilder},
 };
 
@@ -84,6 +88,35 @@ impl Application {
 
         served
     }
+}
+
+/// Builds the configured decider. `PreferLeastErrors` owns a refresh task, so it
+/// takes `tasks` and `shutdown`; `RoundRobin` needs neither and ignores them.
+pub fn build_decider(
+    kind: DeciderKind,
+    upstreams: Vec<Upstream>,
+    observer: Arc<MetricsObserver>,
+    tasks: &mut JoinSet<()>,
+    shutdown: CancellationToken,
+) -> Result<Arc<dyn Decider>> {
+    let decider: Arc<dyn Decider> = match kind {
+        DeciderKind::RoundRobin => {
+            Arc::new(RoundRobin::new(upstreams).context("failed to build the decider")?)
+        }
+        DeciderKind::PreferLeastErrors => PreferLeastErrors::spawn(
+            upstreams,
+            observer,
+            tasks,
+            shutdown,
+            prefer_least_errors::REFRESH_DEFAULT,
+            prefer_least_errors::WINDOW_DEFAULT,
+        )
+        .context("failed to build the decider")?,
+    };
+
+    tracing::info!(event = "decider_selected", decider = kind.as_str());
+
+    Ok(decider)
 }
 
 pub fn build_upstreams<I>(rpcs: I, rpc_timeout_in_secs: u64) -> Vec<Upstream>
