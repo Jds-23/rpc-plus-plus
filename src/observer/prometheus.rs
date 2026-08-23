@@ -1,16 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use axum::{
-    extract::State,
-    http::{StatusCode, header},
-    response::{IntoResponse, Response},
-};
 use prometheus::{
-    Encoder, Registry, TextEncoder,
-    core::{Collector, Desc},
+    core::{Collector as PrometheusCollector, Desc},
     proto::{Bucket, Counter, Histogram, LabelPair, Metric, MetricFamily, MetricType},
 };
-use tracing::error;
 
 use crate::{
     observer::{
@@ -28,13 +21,13 @@ const SUCCESS: &str = "success";
 
 const MICROS_PER_SECOND: f64 = 1_000_000.0;
 
-pub struct MetricsCollector {
+pub struct Collector {
     observer: Arc<MetricsObserver>,
     attempts_desc: Desc,
     attempts_duration_desc: Desc,
 }
 
-impl MetricsCollector {
+impl Collector {
     pub fn new(observer: Arc<MetricsObserver>) -> prometheus::Result<Self> {
         let attempts_desc = Desc::new(
             ATTEMPTS_NAME.to_string(),
@@ -48,7 +41,7 @@ impl MetricsCollector {
             vec!["upstream".to_string()],
             HashMap::new(),
         )?;
-        Ok(MetricsCollector {
+        Ok(Collector {
             observer,
             attempts_desc,
             attempts_duration_desc,
@@ -56,7 +49,7 @@ impl MetricsCollector {
     }
 }
 
-impl Collector for MetricsCollector {
+impl PrometheusCollector for Collector {
     fn collect(&self) -> Vec<prometheus::proto::MetricFamily> {
         let snapshots = &self.observer.snapshots();
         if snapshots.is_empty() {
@@ -172,35 +165,17 @@ fn counter_metric(upstream: &str, outcome: &str, value: u64) -> Metric {
     }
 }
 
-pub async fn get_metrics(State(registry): State<Arc<Registry>>) -> Response {
-    let encoder = TextEncoder::new();
-
-    match encoder.encode_to_string(&registry.gather()) {
-        Ok(body) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, encoder.format_type())],
-            body,
-        )
-            .into_response(),
-        Err(err) => {
-            error!(event = "metrics_render_failed", error = %err);
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use axum::extract::State;
-    use prometheus::{Encoder, Registry, TextEncoder, core::Collector, proto::MetricFamily};
+    use prometheus::{TextEncoder, core::Collector as PrometheusCollector, proto::MetricFamily};
     use reqwest::StatusCode;
 
     use crate::{
-        observer::{MetricsObserver, Observer},
-        route::metrics::{
-            ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, MetricsCollector, cumulative, get_metrics,
+        observer::{
+            MetricsObserver, Observer,
+            prometheus::{ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, Collector, cumulative},
         },
         upstream::{
             UpstreamId,
@@ -255,7 +230,7 @@ rpc_attempt_duration_seconds_count{upstream="alpha"} 1
         let zulu = UpstreamId::new("zulu");
         let alpha = UpstreamId::new("alpha");
         let observer = Arc::new(MetricsObserver::new(vec![zulu.clone(), alpha.clone()]));
-        let collector = MetricsCollector::new(observer.clone()).unwrap();
+        let collector = Collector::new(observer.clone()).unwrap();
 
         observer.record(
             &alpha,
@@ -298,14 +273,14 @@ rpc_attempt_duration_seconds_count{upstream="alpha"} 1
     #[test]
     fn test_collect_is_empty_without_upstreams() {
         let observer = Arc::new(MetricsObserver::new(vec![]));
-        let collector = MetricsCollector::new(observer.clone()).unwrap();
+        let collector = Collector::new(observer.clone()).unwrap();
         assert!(collector.collect().is_empty());
     }
 
     #[test]
     fn test_desc_advertises_both_families() {
         let observer = Arc::new(MetricsObserver::new(vec![]));
-        let collector = MetricsCollector::new(observer.clone()).unwrap();
+        let collector = Collector::new(observer.clone()).unwrap();
 
         let names: Vec<&str> = collector
             .desc()
@@ -327,7 +302,7 @@ rpc_attempt_duration_seconds_count{upstream="alpha"} 1
     fn the_duration_ladder_renders_in_seconds() {
         let alpha = UpstreamId::new("alpha");
         let observer = Arc::new(MetricsObserver::new(vec![alpha.clone()]));
-        let collector = MetricsCollector::new(observer.clone()).unwrap();
+        let collector = Collector::new(observer.clone()).unwrap();
 
         observer.record(
             &alpha,
@@ -346,7 +321,7 @@ rpc_attempt_duration_seconds_count{upstream="alpha"} 1
     fn the_inf_bucket_is_derived_and_matches_the_count() {
         let alpha = UpstreamId::new("alpha");
         let observer = Arc::new(MetricsObserver::new(vec![alpha.clone()]));
-        let collector = MetricsCollector::new(observer.clone()).unwrap();
+        let collector = Collector::new(observer.clone()).unwrap();
 
         observer.record(
             &alpha,
@@ -391,22 +366,6 @@ rpc_attempt_duration_seconds_count{upstream="alpha"} 1
             .1
             .parse()
             .expect("the value parses as f64")
-    }
-
-    #[tokio::test]
-    async fn get_metrics_answers_ok_with_the_exposition_content_type() {
-        let registry = Arc::new(Registry::new());
-
-        let response = get_metrics(State(registry)).await;
-
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-        assert_eq!(
-            response
-                .headers()
-                .get(axum::http::header::CONTENT_TYPE)
-                .unwrap(),
-            TextEncoder::new().format_type()
-        );
     }
 
     fn sorted_lines(s: &str) -> Vec<&str> {

@@ -13,9 +13,9 @@ use crate::{
         prefer_least_errors::{self, PreferLeastErrors},
         round_robin::RoundRobin,
     },
-    observer::MetricsObserver,
+    http,
+    observer::{MetricsObserver, prometheus::Collector},
     proxy::ProxyStateBuilder,
-    route::{self, metrics::MetricsCollector},
     upstream::Upstream,
 };
 
@@ -33,8 +33,8 @@ impl Application {
         decider: Arc<dyn Decider>,
         tasks: JoinSet<()>,
     ) -> Result<Self> {
-        let collector = MetricsCollector::new(observer.clone())
-            .context("failed to build the metrics collector")?;
+        let collector =
+            Collector::new(observer.clone()).context("failed to build the metrics collector")?;
 
         let registry = Registry::new();
         registry
@@ -48,7 +48,7 @@ impl Application {
             .with_retry_after_in_secs(application_settings.proxy.retry_after_in_secs)
             .build();
 
-        let router = route::build_router(Arc::new(state), Arc::new(registry));
+        let router = http::build_router(Arc::new(state), Arc::new(registry));
 
         let addr = format!(
             "{}:{}",

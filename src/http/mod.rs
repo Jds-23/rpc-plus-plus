@@ -7,8 +7,8 @@ use axum::{
 use prometheus::Registry;
 
 use crate::{
+    http::{healthz::get_healthz, metrics::get_metrics, rpc::post_rpc},
     proxy::ProxyState,
-    route::{healthz::get_health, metrics::get_metrics, rpc::rpc_proxy},
 };
 
 pub mod healthz;
@@ -17,8 +17,8 @@ pub mod rpc;
 
 pub(crate) fn build_router(state: Arc<ProxyState>, registry: Arc<Registry>) -> Router {
     Router::new()
-        .route("/healthz", get(get_health))
-        .route("/rpc", post(rpc_proxy))
+        .route("/healthz", get(get_healthz))
+        .route("/rpc", post(post_rpc))
         .with_state(state)
         .merge(
             Router::new()

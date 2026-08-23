@@ -1,3 +1,4 @@
+pub mod prometheus;
 pub mod snapshot;
 
 use std::{
