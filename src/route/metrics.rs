@@ -14,7 +14,7 @@ use tracing::error;
 
 use crate::{
     observer::{BUCKET_BOUNDS_MICROS, MetricsObserver, StatsSnapshot},
-    upstream::CallError,
+    upstream::call::CallError,
 };
 
 const ATTEMPTS_NAME: &str = "rpc_attempts_total";
@@ -199,7 +199,10 @@ mod tests {
         route::metrics::{
             ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, MetricsCollector, cumulative, get_metrics,
         },
-        upstream::{CallError, CallRecord, UpstreamId},
+        upstream::{
+            UpstreamId,
+            call::{CallError, CallRecord},
+        },
     };
 
     const EXPECTED: &str = r#"# HELP rpc_attempts_total Total upstream call attempts by outcome

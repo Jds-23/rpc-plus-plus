@@ -8,7 +8,10 @@ use std::{
 
 use tracing::warn;
 
-use crate::upstream::{CallError, CallRecord, UpstreamId};
+use crate::upstream::{
+    UpstreamId,
+    call::{CallError, CallRecord},
+};
 
 pub trait Observer: Send + Sync + 'static {
     fn record(&self, upstream: &UpstreamId, record: CallRecord<'_>);

@@ -4,8 +4,9 @@ use anyhow::Result;
 use rpc_plus_plus::{
     config,
     observer::MetricsObserver,
-    start_up::{Application, build_decider, build_upstreams},
+    start_up::{Application, build_decider},
     telemetry,
+    upstream::build_all,
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -35,7 +36,7 @@ async fn build(shutdown: &CancellationToken) -> Result<Application> {
     let settings = config::get_settings()?;
     let mut tasks = JoinSet::new();
 
-    let upstreams = build_upstreams(
+    let upstreams = build_all(
         settings.upstreams,
         settings.application.proxy.rpc_timeout_in_secs,
     );

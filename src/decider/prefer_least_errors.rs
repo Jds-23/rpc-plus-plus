@@ -257,8 +257,16 @@ mod tests {
     use super::*;
     use crate::{
         observer::Observer,
-        upstream::{CallError, CallRecord},
+        upstream::call::{CallError, CallRecord},
     };
+
+    fn upstream(label: &str) -> Upstream {
+        Upstream::builder()
+            .label(label)
+            .url(format!("http://{label}.invalid"))
+            .build()
+            .expect("upstream build failed")
+    }
 
     /// Builds the refresher by hand rather than through `spawn`, so the ranking
     /// can be driven with no runtime, no ticker and no clock.
@@ -285,12 +293,7 @@ mod tests {
         ));
         let upstreams = labels
             .iter()
-            .map(|label| {
-                Arc::new(Upstream::new(
-                    format!("http://{label}.invalid"),
-                    UpstreamId::new(*label),
-                ))
-            })
+            .map(|label| Arc::new(upstream(label)))
             .collect();
         let decider = Arc::new(PreferLeastErrors {
             ranking: ArcSwap::from_pointee(Ranking { upstreams }),
@@ -491,8 +494,7 @@ mod tests {
     async fn creates_a_task() {
         let mut tasks: JoinSet<()> = JoinSet::new();
         assert_eq!(tasks.len(), 0);
-        let upstreams: Vec<Upstream> =
-            vec![Upstream::new("url".to_string(), UpstreamId::new("label"))];
+        let upstreams: Vec<Upstream> = vec![upstream("label")];
         let metrics_observer = Arc::new(MetricsObserver::new(vec![UpstreamId::new("label")]));
         let shutdown = CancellationToken::new();
         let _decider = PreferLeastErrors::spawn(
@@ -530,7 +532,7 @@ mod tests {
     async fn spawn_rejects_a_zero_window() {
         let mut tasks: JoinSet<()> = JoinSet::new();
         let observer = Arc::new(MetricsObserver::new(vec![UpstreamId::new("one")]));
-        let upstreams = vec![Upstream::new("url".to_string(), UpstreamId::new("one"))];
+        let upstreams = vec![upstream("one")];
 
         let built = PreferLeastErrors::spawn(
             upstreams,
@@ -550,10 +552,7 @@ mod tests {
     async fn spawn_rejects_an_upstream_the_observer_does_not_track() {
         let mut tasks: JoinSet<()> = JoinSet::new();
         let observer = Arc::new(MetricsObserver::new(vec![UpstreamId::new("known")]));
-        let upstreams = vec![
-            Upstream::new("url".to_string(), UpstreamId::new("known")),
-            Upstream::new("url".to_string(), UpstreamId::new("stranger")),
-        ];
+        let upstreams = vec![upstream("known"), upstream("stranger")];
 
         let built = PreferLeastErrors::spawn(
             upstreams,

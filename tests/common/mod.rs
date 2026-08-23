@@ -10,8 +10,8 @@ use rpc_plus_plus::{
     config::{ApplicationSettings, DeciderKind, ProxySettings, Settings, UpstreamSettings},
     decider::{Decider, prefer_least_errors::PreferLeastErrors, round_robin::RoundRobin},
     observer::MetricsObserver,
-    start_up::{Application, build_upstreams},
-    upstream::{Upstream, UpstreamId},
+    start_up::Application,
+    upstream::{Upstream, UpstreamId, build_all},
 };
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -53,7 +53,7 @@ pub fn upstreams(settings: &Settings) -> Vec<Upstream> {
         .map(|entry| rpc(&entry.label, entry.url.clone()))
         .collect();
 
-    build_upstreams(upstreams, settings.application.proxy.rpc_timeout_in_secs)
+    build_all(upstreams, settings.application.proxy.rpc_timeout_in_secs)
 }
 
 fn round_robin(settings: &Settings) -> Arc<dyn Decider> {

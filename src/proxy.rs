@@ -14,7 +14,10 @@ use uuid::Uuid;
 use crate::{
     decider::Decider,
     observer::Observer,
-    upstream::{CallError, CallOutcome, Upstream, UpstreamId},
+    upstream::{
+        Upstream, UpstreamId,
+        call::{CallError, CallOutcome},
+    },
 };
 
 const DEFAULT_MAX_ATTEMPT: u64 = 3;

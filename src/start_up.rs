@@ -7,7 +7,7 @@ use tokio::{net::TcpListener, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    config::{ApplicationSettings, DeciderKind, UpstreamSettings},
+    config::{ApplicationSettings, DeciderKind},
     decider::{
         Decider,
         prefer_least_errors::{self, PreferLeastErrors},
@@ -16,7 +16,7 @@ use crate::{
     observer::MetricsObserver,
     proxy::ProxyStateBuilder,
     route::{self, metrics::MetricsCollector},
-    upstream::{Upstream, UpstreamBuilder},
+    upstream::Upstream,
 };
 
 pub struct Application {
@@ -117,29 +117,4 @@ pub fn build_decider(
     tracing::info!(event = "decider_selected", decider = kind.as_str());
 
     Ok(decider)
-}
-
-pub fn build_upstreams<I>(upstreams: I, rpc_timeout_in_secs: u64) -> Vec<Upstream>
-where
-    I: IntoIterator<Item = UpstreamSettings>,
-{
-    upstreams
-        .into_iter()
-        .filter_map(|item| {
-            UpstreamBuilder::new(&item.label, &item.url)
-                .and_then(|builder| {
-                    builder
-                        .with_rpc_timeout_in_secs(rpc_timeout_in_secs)
-                        .build()
-                })
-                .map_err(|err| {
-                    tracing::warn!(
-                        event = "upstream_skipped",
-                        upstream = %item.label,
-                        error = %err,
-                    );
-                })
-                .ok()
-        })
-        .collect()
 }
