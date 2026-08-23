@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     decider::Decider,
-    observer::{MetricsObserver, StatsSnapshot},
+    observer::{MetricsObserver, snapshot::Snapshot},
     upstream::{Upstream, UpstreamId},
 };
 
@@ -45,7 +45,7 @@ pub struct PreferLeastErrors {
 
 struct RankingRefresher {
     metrics_observer: Arc<MetricsObserver>,
-    baseline: VecDeque<HashMap<UpstreamId, StatsSnapshot>>,
+    baseline: VecDeque<HashMap<UpstreamId, Snapshot>>,
     decider: Arc<PreferLeastErrors>,
     interval: Duration,
     window_ticks: usize,
@@ -68,7 +68,7 @@ impl RankingRefresher {
 
     pub fn refresh(&mut self) {
         let started = Instant::now();
-        let current: HashMap<UpstreamId, StatsSnapshot> = self.metrics_observer.snapshot_map();
+        let current: HashMap<UpstreamId, Snapshot> = self.metrics_observer.snapshot_map();
         let baseline = self
             .baseline
             .front()

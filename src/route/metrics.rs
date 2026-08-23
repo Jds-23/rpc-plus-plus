@@ -13,7 +13,10 @@ use prometheus::{
 use tracing::error;
 
 use crate::{
-    observer::{BUCKET_BOUNDS_MICROS, MetricsObserver, StatsSnapshot},
+    observer::{
+        MetricsObserver,
+        snapshot::{BUCKET_BOUNDS_MICROS, Snapshot},
+    },
     upstream::call::CallError,
 };
 
@@ -99,7 +102,7 @@ fn family(name: &str, help: &str, kind: MetricType, metrics: Vec<Metric>) -> Met
     family
 }
 
-fn outcomes(snapshot: &StatsSnapshot) -> [(&'static str, u64); 4] {
+fn outcomes(snapshot: &Snapshot) -> [(&'static str, u64); 4] {
     [
         (SUCCESS, snapshot.success),
         (CallError::UNREACHABLE, snapshot.unreachable),
@@ -116,7 +119,7 @@ fn label(name: &str, value: &str) -> LabelPair {
     }
 }
 
-fn histogram_metric(upstream: &str, snapshot: &StatsSnapshot) -> Metric {
+fn histogram_metric(upstream: &str, snapshot: &Snapshot) -> Metric {
     let buckets = BUCKET_BOUNDS_MICROS
         .iter()
         .zip(cumulative(snapshot.buckets))
@@ -148,7 +151,7 @@ fn cumulative(buckets: [u64; BUCKET_BOUNDS_MICROS.len()]) -> [u64; BUCKET_BOUNDS
     })
 }
 
-fn attempts(snapshot: &StatsSnapshot) -> u64 {
+fn attempts(snapshot: &Snapshot) -> u64 {
     outcomes(snapshot).into_iter().map(|(_, count)| count).sum()
 }
 
