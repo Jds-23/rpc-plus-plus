@@ -7,10 +7,10 @@ pub mod mock_rpc_server;
 use std::{sync::Arc, time::Duration};
 
 use rpc_plus_plus::{
+    app::Application,
     config::{ApplicationSettings, DeciderKind, ProxySettings, Settings, UpstreamSettings},
     decider::{Decider, prefer_least_errors::PreferLeastErrors, round_robin::RoundRobin},
     observer::MetricsObserver,
-    start_up::Application,
     upstream::{Upstream, UpstreamId, build_all},
 };
 use tokio::task::{JoinHandle, JoinSet};
@@ -126,7 +126,12 @@ async fn build_app(
     observer: Arc<MetricsObserver>,
     decider: Arc<dyn Decider>,
 ) -> TestApp {
-    let app = Application::build(application, observer, decider, JoinSet::new())
+    let app = Application::builder()
+        .settings(application)
+        .observer(observer)
+        .decider(decider)
+        .tasks(JoinSet::new())
+        .build()
         .await
         .expect("app build failed");
     let addr = format!("http://127.0.0.1:{}", app.port());

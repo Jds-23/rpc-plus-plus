@@ -1,14 +1,4 @@
-use std::sync::Arc;
-
-use anyhow::Result;
-use rpc_plus_plus::{
-    config,
-    observer::MetricsObserver,
-    start_up::{Application, build_decider},
-    telemetry,
-    upstream::build_all,
-};
-use tokio::task::JoinSet;
+use rpc_plus_plus::{app, config, telemetry};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -32,26 +22,8 @@ async fn main() {
     }
 }
 
-async fn build(shutdown: &CancellationToken) -> Result<Application> {
-    let settings = config::get_settings()?;
-    let mut tasks = JoinSet::new();
-
-    let upstreams = build_all(
-        settings.upstreams,
-        settings.application.proxy.rpc_timeout_in_secs,
-    );
-    let observer = Arc::new(MetricsObserver::new(
-        upstreams.iter().map(|upstream| upstream.id().clone()),
-    ));
-    let decider = build_decider(
-        settings.decider,
-        upstreams,
-        observer.clone(),
-        &mut tasks,
-        shutdown.clone(),
-    )?;
-
-    Application::build(settings.application, observer, decider, tasks).await
+async fn build(shutdown: &CancellationToken) -> anyhow::Result<app::Application> {
+    app::build(config::get_settings()?, shutdown).await
 }
 
 async fn watch_for_shutdown(shutdown: CancellationToken) {
