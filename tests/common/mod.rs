@@ -70,15 +70,15 @@ pub fn prefer_least_errors(
     refresh: Duration,
     window: usize,
 ) -> Arc<dyn Decider> {
-    PreferLeastErrors::spawn(
-        upstreams(settings),
-        observer,
-        tasks,
-        shutdown,
-        refresh,
-        window,
-    )
-    .expect("decider build failed")
+    PreferLeastErrors::builder()
+        .upstreams(upstreams(settings))
+        .observer(observer)
+        .tasks(tasks)
+        .shutdown(shutdown)
+        .refresh(refresh)
+        .window(window)
+        .spawn()
+        .expect("decider build failed")
 }
 
 pub fn observer_for(settings: &Settings) -> Arc<MetricsObserver> {

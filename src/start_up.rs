@@ -8,11 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::{ApplicationSettings, DeciderKind},
-    decider::{
-        Decider,
-        prefer_least_errors::{self, PreferLeastErrors},
-        round_robin::RoundRobin,
-    },
+    decider::{Decider, prefer_least_errors::PreferLeastErrors, round_robin::RoundRobin},
     http,
     observer::{MetricsObserver, prometheus::Collector},
     proxy::Pipeline,
@@ -107,15 +103,13 @@ pub fn build_decider(
         DeciderKind::RoundRobin => {
             Arc::new(RoundRobin::new(upstreams).context("failed to build the decider")?)
         }
-        DeciderKind::PreferLeastErrors => PreferLeastErrors::spawn(
-            upstreams,
-            observer,
-            tasks,
-            shutdown,
-            prefer_least_errors::REFRESH_DEFAULT,
-            prefer_least_errors::WINDOW_DEFAULT,
-        )
-        .context("failed to build the decider")?,
+        DeciderKind::PreferLeastErrors => PreferLeastErrors::builder()
+            .upstreams(upstreams)
+            .observer(observer)
+            .tasks(tasks)
+            .shutdown(shutdown)
+            .spawn()
+            .context("failed to build the decider")?,
     };
 
     tracing::info!(event = "decider_selected", decider = kind.as_str());
