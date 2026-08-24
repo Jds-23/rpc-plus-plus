@@ -11,6 +11,7 @@ use reqwest::{StatusCode, header};
 
 use crate::{
     config::UpstreamSettings,
+    jsonrpc::rpc_fault_in,
     upstream::call::{CallError, CallOutcome, CallResult, error_chain},
 };
 
@@ -134,6 +135,14 @@ impl Upstream {
 
         if http_status != StatusCode::OK {
             return Err(CallError::ErrorStatus { http_status });
+        }
+
+        if let Some(fault) = rpc_fault_in(&body) {
+            return Err(CallError::RpcError {
+                http_status,
+                code: fault.code,
+                retryable: fault.retryable,
+            });
         }
 
         Ok(CallOutcome {

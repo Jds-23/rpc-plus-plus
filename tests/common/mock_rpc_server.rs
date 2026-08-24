@@ -84,3 +84,9 @@ pub async fn ok(result: impl Into<Value>) -> MockServer {
 pub async fn failing(status: StatusCode) -> MockServer {
     mock_rpc(move |_| status).await
 }
+
+/// Always replies HTTP 200 carrying a JSON-RPC `error` member — how providers
+/// signal a rate limit.
+pub async fn rpc_erroring(code: i64, message: &'static str) -> MockServer {
+    mock_rpc(move |_| RpcReply::error(code, message)).await
+}

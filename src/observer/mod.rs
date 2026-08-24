@@ -68,6 +68,7 @@ impl Observer for MetricsObserver {
             Err(CallError::ErrorStatus { .. }) => &stat.error_status,
             Err(CallError::ReadFailed { .. }) => &stat.read_failed,
             Err(CallError::Unreachable { .. }) => &stat.unreachable,
+            Err(CallError::RpcError { .. }) => &stat.rpc_error,
         };
 
         counter.fetch_add(1, Ordering::Relaxed);

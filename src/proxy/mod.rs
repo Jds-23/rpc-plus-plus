@@ -1,5 +1,4 @@
 pub mod attempt;
-pub mod jsonrpc;
 
 use axum::{
     body::Bytes,
@@ -15,11 +14,9 @@ use uuid::Uuid;
 
 use crate::{
     decider::Decider,
+    jsonrpc::{JSONRPC_INTERNAL_ERROR, Shape, rpc_error, shape},
     observer::Observer,
-    proxy::{
-        attempt::try_once,
-        jsonrpc::{JSONRPC_INTERNAL_ERROR, is_batch, rpc_error},
-    },
+    proxy::attempt::try_once,
     upstream::{UpstreamId, call::CallError},
 };
 
@@ -70,53 +67,67 @@ impl Pipeline {
     async fn proxy_inner(&self, body: Bytes) -> Response {
         let received_at = Instant::now();
         info!(event = "request_received", body_bytes = body.len());
-
-        if is_batch(&body) {
-            warn!(event = "batch_rejected", body_bytes = body.len());
-            return StatusCode::BAD_REQUEST.into_response();
-        }
-
-        let chain = self.decider.decide(self.max_attempt);
-        let mut tried: Vec<&UpstreamId> = Vec::with_capacity(chain.len());
-
-        let mut last_failure: Option<CallError> = None;
-
-        for upstream in &chain {
-            if tried.len() >= self.max_attempt {
-                break;
+        match shape(&body) {
+            Shape::Batch => {
+                warn!(event = "batch_rejected", body_bytes = body.len());
+                StatusCode::BAD_REQUEST.into_response()
             }
-            if !tried.is_empty() {
-                tokio::time::sleep(self.retry_after).await;
-            }
-            tried.push(upstream.id());
+            Shape::Single => {
+                let chain = self.decider.decide(self.max_attempt);
+                let mut tried: Vec<&UpstreamId> = Vec::with_capacity(chain.len());
 
-            match try_once(self.observer.as_ref(), upstream, &body, tried.len() as u64).await {
-                Ok(response) => {
-                    info!(
-                        event = "request_completed",
-                        attempts = tried.len(),
-                        upstream = %upstream.id(),
-                        duration_ms = elapsed_ms(received_at),
-                    );
-                    return response;
+                let mut last_failure: Option<CallError> = None;
+
+                for upstream in &chain {
+                    if tried.len() >= self.max_attempt {
+                        break;
+                    }
+                    if !tried.is_empty() {
+                        tokio::time::sleep(self.retry_after).await;
+                    }
+                    tried.push(upstream.id());
+
+                    match try_once(self.observer.as_ref(), upstream, &body, tried.len() as u64)
+                        .await
+                    {
+                        Ok(response) => {
+                            info!(
+                                event = "request_completed",
+                                attempts = tried.len(),
+                                upstream = %upstream.id(),
+                                duration_ms = elapsed_ms(received_at),
+                            );
+                            return response;
+                        }
+                        Err(failure) => {
+                            let retryable = failure.is_retryable();
+                            last_failure = Some(failure);
+                            if !retryable {
+                                break;
+                            }
+                        }
+                    }
                 }
-                Err(failure) => last_failure = Some(failure),
+
+                let error = match &last_failure {
+                    Some(failure) => failure.to_string(),
+                    None => "no upstream available".to_string(),
+                };
+
+                error!(
+                    event = "retries_exhausted",
+                    attempts = tried.len(),
+                    tried = ?tried,
+                    duration_ms = elapsed_ms(received_at),
+                    error = %error,
+                );
+                rpc_error(JSONRPC_INTERNAL_ERROR, &error)
+            }
+            Shape::Malformed => {
+                warn!(event = "batch_malformed", body_bytes = body.len());
+                StatusCode::BAD_REQUEST.into_response()
             }
         }
-
-        let error = match &last_failure {
-            Some(failure) => failure.to_string(),
-            None => "no upstream available".to_string(),
-        };
-
-        error!(
-            event = "retries_exhausted",
-            attempts = tried.len(),
-            tried = ?tried,
-            duration_ms = elapsed_ms(received_at),
-            error = %error,
-        );
-        rpc_error(JSONRPC_INTERNAL_ERROR, &error)
     }
 }
 

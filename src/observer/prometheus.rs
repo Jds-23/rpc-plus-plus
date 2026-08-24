@@ -95,12 +95,13 @@ fn family(name: &str, help: &str, kind: MetricType, metrics: Vec<Metric>) -> Met
     family
 }
 
-fn outcomes(snapshot: &Snapshot) -> [(&'static str, u64); 4] {
+fn outcomes(snapshot: &Snapshot) -> [(&'static str, u64); 5] {
     [
         (SUCCESS, snapshot.success),
         (CallError::UNREACHABLE, snapshot.unreachable),
         (CallError::READ_FAILED, snapshot.read_failed),
         (CallError::ERROR_STATUS, snapshot.error_status),
+        (CallError::RPC_ERROR, snapshot.rpc_error),
     ]
 }
 
@@ -189,10 +190,12 @@ rpc_attempts_total{outcome="success",upstream="alpha"} 1
 rpc_attempts_total{outcome="unreachable",upstream="alpha"} 2
 rpc_attempts_total{outcome="read_failed",upstream="alpha"} 1
 rpc_attempts_total{outcome="error_status",upstream="alpha"} 0
+rpc_attempts_total{outcome="rpc_error",upstream="alpha"} 1
 rpc_attempts_total{outcome="success",upstream="zulu"} 0
 rpc_attempts_total{outcome="unreachable",upstream="zulu"} 0
 rpc_attempts_total{outcome="read_failed",upstream="zulu"} 0
 rpc_attempts_total{outcome="error_status",upstream="zulu"} 0
+rpc_attempts_total{outcome="rpc_error",upstream="zulu"} 0
 "#;
 
     /// One 100ms attempt: `BUCKET_BOUNDS_MICROS` in seconds, cumulative from the
@@ -264,6 +267,21 @@ rpc_attempt_duration_seconds_count{upstream="alpha"} 1
                 },
             );
         }
+
+        // A rate limit arriving on an HTTP 200. It must land on its own series,
+        // not on `success`.
+        let rpc_error = CallError::RpcError {
+            http_status: StatusCode::OK,
+            code: -32005,
+            retryable: true,
+        };
+        observer.record(
+            &alpha,
+            CallRecord {
+                outcome: Err(&rpc_error),
+                duration: Duration::from_millis(150),
+            },
+        );
 
         let actual = encode(&collector.collect(), ATTEMPTS_NAME);
 

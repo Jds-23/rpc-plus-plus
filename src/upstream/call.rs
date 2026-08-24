@@ -40,6 +40,12 @@ pub enum CallError {
         http_status: StatusCode,
         error: String,
     },
+    #[error("upstream returned rpc error code {}", code)]
+    RpcError {
+        http_status: StatusCode,
+        code: i64,
+        retryable: bool,
+    },
     #[error("upstream returned error status {}", http_status.as_u16())]
     ErrorStatus { http_status: StatusCode },
 }
@@ -48,14 +54,31 @@ impl CallError {
     pub const UNREACHABLE: &'static str = "unreachable";
     pub const READ_FAILED: &'static str = "read_failed";
     pub const ERROR_STATUS: &'static str = "error_status";
+    pub const RPC_ERROR: &'static str = "rpc_error";
 
     /// `None` for `Unreachable`: no response arrived to carry a status.
     pub fn http_status(&self) -> Option<StatusCode> {
         match self {
             CallError::Unreachable { .. } => None,
-            CallError::ReadFailed { http_status, .. } | CallError::ErrorStatus { http_status } => {
-                Some(*http_status)
+            CallError::ReadFailed { http_status, .. }
+            | CallError::ErrorStatus { http_status }
+            | CallError::RpcError { http_status, .. } => Some(*http_status),
+        }
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            // No response arrived. A different upstream is a different connection.
+            CallError::Unreachable { .. } => true,
+            // The body died mid-read; the same request may land fine on a peer.
+            CallError::ReadFailed { .. } => true,
+            // 429 and 5xx are the upstream's problem. A 4xx is the caller's, and
+            // every upstream will answer it the same way.
+            CallError::ErrorStatus { http_status } => {
+                *http_status == StatusCode::TOO_MANY_REQUESTS || http_status.is_server_error()
             }
+            // Already decided by the error code, in `jsonrpc::is_retryable`.
+            CallError::RpcError { retryable, .. } => *retryable,
         }
     }
 }

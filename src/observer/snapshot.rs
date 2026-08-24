@@ -19,6 +19,7 @@ pub struct UpstreamStats {
     pub unreachable: AtomicU64,
     pub read_failed: AtomicU64,
     pub error_status: AtomicU64,
+    pub rpc_error: AtomicU64,
 
     pub buckets: [AtomicU64; BUCKET_BOUNDS_MICROS.len()],
     pub duration_micros_total: AtomicU64,
@@ -31,6 +32,7 @@ impl UpstreamStats {
             unreachable: self.unreachable.load(Ordering::Relaxed),
             read_failed: self.read_failed.load(Ordering::Relaxed),
             error_status: self.error_status.load(Ordering::Relaxed),
+            rpc_error: self.rpc_error.load(Ordering::Relaxed),
             buckets: self
                 .buckets
                 .each_ref()
@@ -45,6 +47,7 @@ pub struct Snapshot {
     pub unreachable: u64,
     pub read_failed: u64,
     pub error_status: u64,
+    pub rpc_error: u64,
 
     pub buckets: [u64; BUCKET_BOUNDS_MICROS.len()],
     pub duration_micros_total: u64,
@@ -55,11 +58,12 @@ pub struct Diff {
     unreachable: u64,
     read_failed: u64,
     error_status: u64,
+    rpc_error: u64,
 }
 
 impl Diff {
     pub fn error(&self) -> u64 {
-        self.error_status + self.read_failed + self.unreachable
+        self.error_status + self.read_failed + self.unreachable + self.rpc_error
     }
     pub fn success(&self) -> u64 {
         self.success
@@ -85,6 +89,7 @@ impl Snapshot {
             unreachable: d(|diff| diff.unreachable),
             read_failed: d(|diff| diff.read_failed),
             error_status: d(|diff| diff.error_status),
+            rpc_error: d(|diff| diff.rpc_error),
         }
     }
 }

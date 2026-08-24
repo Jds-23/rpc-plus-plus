@@ -62,6 +62,20 @@ pub(super) async fn try_once(
                     http_status = http_status.as_u16(),
                     error = %error,
                 ),
+                CallError::RpcError {
+                    http_status,
+                    code,
+                    retryable,
+                } => warn!(
+                    event = "attempt_failed",
+                    attempt,
+                    upstream = %id,
+                    duration_ms = duration,
+                    http_status = http_status.as_u16(),
+                    rpc_error_code = code,
+                    retryable,
+                    error = "upstream returned a json-rpc error",
+                ),
                 CallError::ErrorStatus { http_status } => warn!(
                     event = "attempt_failed",
                     attempt,

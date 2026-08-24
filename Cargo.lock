@@ -1509,6 +1509,7 @@ dependencies = [
  "bon",
  "config",
  "http-body-util",
+ "memchr",
  "mime",
  "prometheus",
  "reqwest",
