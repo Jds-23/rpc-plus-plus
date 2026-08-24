@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -15,7 +15,7 @@ use crate::{
     },
     http,
     observer::{MetricsObserver, prometheus::Collector},
-    proxy::ProxyStateBuilder,
+    proxy::Pipeline,
     upstream::Upstream,
 };
 
@@ -43,12 +43,16 @@ impl Application {
 
         let upstream_count = decider.upstream_len();
 
-        let state = ProxyStateBuilder::new(decider, observer)
-            .with_max_attempt(application_settings.proxy.max_attempt)?
-            .with_retry_after_in_secs(application_settings.proxy.retry_after_in_secs)
-            .build();
+        let pipeline = Pipeline::builder()
+            .decider(decider)
+            .observer(observer)
+            .max_attempt(application_settings.proxy.max_attempt)
+            .retry_after(Duration::from_secs(
+                application_settings.proxy.retry_after_in_secs,
+            ))
+            .build()?;
 
-        let router = http::build_router(Arc::new(state), Arc::new(registry));
+        let router = http::build_router(Arc::new(pipeline), Arc::new(registry));
 
         let addr = format!(
             "{}:{}",
