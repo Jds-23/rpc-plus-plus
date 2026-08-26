@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    fmt::{Debug, Display},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -103,17 +104,17 @@ impl RankingRefresher {
                     .map(|(current, baseline)| current.diff(baseline))
                 else {
                     tracing::warn!(event = "ranking_upstream_missing", upstream = %id);
-                    return (upstream.clone(), SortKey::unscored());
+                    return (upstream.clone(), SortKey::Unscored);
                 };
 
                 let key = if window.total() < self.min_samples {
                     // A starved upstream rates a perfect 0.0, which would unseat a
                     // proven one on no evidence.
-                    SortKey::unscored()
+                    SortKey::Unscored
                 } else if incumbent == Some(id) {
-                    SortKey::scored(window.error_rate() * self.margin)
+                    SortKey::Scored(window.error_rate() * self.margin)
                 } else {
-                    SortKey::scored(window.error_rate())
+                    SortKey::Scored(window.error_rate())
                 };
 
                 (upstream.clone(), key)
@@ -126,7 +127,7 @@ impl RankingRefresher {
             .iter()
             .map(|(upstream, _)| upstream.id().as_str())
             .collect();
-        let scores: Vec<String> = scored.iter().map(|(_, key)| key.render()).collect();
+        let scores: Vec<&SortKey> = scored.iter().map(|(_, key)| key).collect();
         tracing::info!(
             event = "ranking_rebuilt",
             order = ?order,
@@ -195,38 +196,42 @@ impl PreferLeastErrors {
 }
 
 #[derive(PartialEq)]
-struct SortKey {
-    unscored: bool,
-    error_rate: f64,
+enum SortKey {
+    Unscored,
+    Scored(f64),
 }
 
-impl SortKey {
-    fn scored(error_rate: f64) -> Self {
-        SortKey {
-            unscored: false,
-            error_rate,
+impl Display for SortKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unscored => write!(f, "unscored"),
+            Self::Scored(error_rate) => write!(f, "{:.4}", error_rate),
         }
     }
+}
 
-    fn unscored() -> Self {
-        SortKey {
-            unscored: true,
-            error_rate: 0.0,
-        }
+impl Debug for SortKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
     }
+}
 
-    fn render(&self) -> String {
-        if self.unscored {
-            "unscored".to_string()
-        } else {
-            format!("{:.4}", self.error_rate)
-        }
+impl Eq for SortKey {}
+
+impl PartialOrd for SortKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
+}
 
+impl Ord for SortKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.unscored
-            .cmp(&other.unscored)
-            .then_with(|| self.error_rate.total_cmp(&other.error_rate))
+        match (self, other) {
+            (Self::Unscored, Self::Unscored) => std::cmp::Ordering::Equal,
+            (Self::Unscored, Self::Scored(_)) => std::cmp::Ordering::Greater, // Scored first
+            (Self::Scored(_), Self::Unscored) => std::cmp::Ordering::Less,
+            (Self::Scored(a), Self::Scored(b)) => a.total_cmp(b),
+        }
     }
 }
 
