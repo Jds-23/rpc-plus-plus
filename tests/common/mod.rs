@@ -4,32 +4,39 @@
 #![allow(dead_code)]
 
 pub mod mock_rpc_server;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use rpc_plus_plus::{
+    app::Application,
+    config::{ApplicationSettings, DeciderKind, ProxySettings, Settings, UpstreamSettings},
+    decider::{Decider, prefer_least_errors::PreferLeastErrors, round_robin::RoundRobin},
     observer::MetricsObserver,
-    settings::{RpcSettings, Settings},
-    start_up::Application,
-    upstream::UpstreamId,
+    upstream::{Upstream, UpstreamId, build_all},
 };
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-pub fn test_settings(rpcs: Vec<RpcSettings>) -> Settings {
+pub fn test_settings(upstreams: Vec<UpstreamSettings>) -> Settings {
     Settings {
-        rpcs,
-        application_host: "127.0.0.1".to_string(),
-        application_port: 0,
-        max_attempt: 3,
-        rpc_timeout_in_secs: 1,
-        retry_after_in_secs: 1,
+        upstreams,
+        application: ApplicationSettings {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            proxy: ProxySettings {
+                max_attempt: 3,
+                retry_after_in_secs: 1,
+                rpc_timeout_in_secs: 1,
+            },
+        },
+        legacy_rpc_timeout_in_secs: None,
+        decider: DeciderKind::RoundRobin,
     }
 }
 
-pub fn rpc(label: &str, rpc_url: impl Into<String>) -> RpcSettings {
-    RpcSettings {
+pub fn rpc(label: &str, url: impl Into<String>) -> UpstreamSettings {
+    UpstreamSettings {
         label: label.to_string(),
-        rpc_url: rpc_url.into(),
+        url: url.into(),
     }
 }
 
@@ -39,10 +46,45 @@ pub struct TestApp {
     pub server: JoinHandle<anyhow::Result<()>>,
 }
 
+pub fn upstreams(settings: &Settings) -> Vec<Upstream> {
+    let upstreams: Vec<UpstreamSettings> = settings
+        .upstreams
+        .iter()
+        .map(|entry| rpc(&entry.label, entry.url.clone()))
+        .collect();
+
+    build_all(upstreams, settings.application.proxy.rpc_timeout_in_secs)
+}
+
+fn round_robin(settings: &Settings) -> Arc<dyn Decider> {
+    Arc::new(RoundRobin::new(upstreams(settings)).expect("decider build failed"))
+}
+
+/// Dropping a `JoinSet` aborts its tasks, so the refresher lives exactly as long
+/// as the caller's `tasks`.
+pub fn prefer_least_errors(
+    settings: &Settings,
+    observer: Arc<MetricsObserver>,
+    tasks: &mut JoinSet<()>,
+    shutdown: CancellationToken,
+    refresh: Duration,
+    window: usize,
+) -> Arc<dyn Decider> {
+    PreferLeastErrors::builder()
+        .upstreams(upstreams(settings))
+        .observer(observer)
+        .tasks(tasks)
+        .shutdown(shutdown)
+        .refresh(refresh)
+        .window(window)
+        .spawn()
+        .expect("decider build failed")
+}
+
 pub fn observer_for(settings: &Settings) -> Arc<MetricsObserver> {
     Arc::new(MetricsObserver::new(
         settings
-            .rpcs
+            .upstreams
             .iter()
             .map(|rpc| UpstreamId::new(rpc.label.as_str())),
     ))
@@ -50,20 +92,46 @@ pub fn observer_for(settings: &Settings) -> Arc<MetricsObserver> {
 
 pub async fn spawn_app_with_handle(settings: Settings) -> TestApp {
     let observer = observer_for(&settings);
-    build_app(settings, observer).await
+    let decider = round_robin(&settings);
+    build_app(settings.application, observer, decider).await
 }
 
 pub async fn spawn_app(settings: Settings) -> String {
-    let observer = observer_for(&settings);
-    build_app(settings, observer).await.addr
+    spawn_app_with_handle(settings).await.addr
 }
 
 pub async fn spawn_app_with_observer(settings: Settings, observer: Arc<MetricsObserver>) -> String {
-    build_app(settings, observer).await.addr
+    let decider = round_robin(&settings);
+    spawn_app_with_observer_and_decider(settings, observer, decider).await
 }
 
-async fn build_app(settings: Settings, observer: Arc<MetricsObserver>) -> TestApp {
-    let app = Application::build(settings, observer)
+pub async fn spawn_app_with_decider(settings: Settings, decider: Arc<dyn Decider>) -> String {
+    let observer = observer_for(&settings);
+    spawn_app_with_observer_and_decider(settings, observer, decider).await
+}
+
+/// One observer for both: a decider scoring off its own instance reads only zeros.
+pub async fn spawn_app_with_observer_and_decider(
+    settings: Settings,
+    observer: Arc<MetricsObserver>,
+    decider: Arc<dyn Decider>,
+) -> String {
+    build_app(settings.application, observer, decider)
+        .await
+        .addr
+}
+
+async fn build_app(
+    application: ApplicationSettings,
+    observer: Arc<MetricsObserver>,
+    decider: Arc<dyn Decider>,
+) -> TestApp {
+    let app = Application::builder()
+        .settings(application)
+        .observer(observer)
+        .decider(decider)
+        .tasks(JoinSet::new())
+        .build()
         .await
         .expect("app build failed");
     let addr = format!("http://127.0.0.1:{}", app.port());

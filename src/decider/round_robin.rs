@@ -19,21 +19,23 @@ impl Decider for RoundRobin {
         let (head, tail) = self.upstreams.split_at(start);
         tail.iter().chain(head).take(max).cloned().collect()
     }
+
+    fn upstream_len(&self) -> usize {
+        self.upstreams.len()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RoundRobinBuildError {
+pub enum BuildError {
     #[error("upstreams must not be empty")]
     EmptyUpstreams,
 }
 
 impl RoundRobin {
-    pub fn new(
-        upstreams: impl IntoIterator<Item = Upstream>,
-    ) -> Result<Self, RoundRobinBuildError> {
+    pub fn new(upstreams: impl IntoIterator<Item = Upstream>) -> Result<Self, BuildError> {
         let upstreams: Vec<Arc<Upstream>> = upstreams.into_iter().map(Arc::new).collect();
         if upstreams.is_empty() {
-            return Err(RoundRobinBuildError::EmptyUpstreams);
+            return Err(BuildError::EmptyUpstreams);
         }
         Ok(RoundRobin {
             upstreams,

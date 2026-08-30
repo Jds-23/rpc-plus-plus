@@ -2,8 +2,8 @@ use std::{sync::Arc, time::Instant};
 
 use reqwest::StatusCode;
 use rpc_plus_plus::{
+    config::{Settings, UpstreamSettings},
     observer::MetricsObserver,
-    settings::{RpcSettings, Settings},
     upstream::UpstreamId,
 };
 use serde_json::json;
@@ -17,10 +17,10 @@ const DEAD_URL: &str = "http://127.0.0.1:1";
 
 /// Every upstream gets a turn, and `retry_after` is zeroed so the loop does not
 /// sleep between attempts.
-fn settings(rpcs: Vec<RpcSettings>) -> Settings {
-    let mut settings = test_settings(rpcs);
-    settings.max_attempt = settings.rpcs.len() as u64;
-    settings.retry_after_in_secs = 0;
+fn settings(upstreams: Vec<UpstreamSettings>) -> Settings {
+    let mut settings = test_settings(upstreams);
+    settings.application.proxy.max_attempt = settings.upstreams.len() as u64;
+    settings.application.proxy.retry_after_in_secs = 0;
     settings
 }
 
@@ -113,4 +113,27 @@ async fn recorded_duration_stays_within_the_request() {
         recorded <= whole_request,
         "recorded {recorded}us exceeds the request it happened inside ({whole_request}us)"
     );
+}
+
+/// A rate limit arrives as HTTP 200 with a JSON-RPC `error` member. Until the
+/// body was decoded this read as a clean success, which is what left the ranking
+/// blind to a throttled provider.
+#[tokio::test]
+async fn a_json_rpc_error_on_a_200_is_not_a_success() {
+    let limited = mock_rpc_server::rpc_erroring(-32005, "limit exceeded").await;
+    let (ids, observer) = observer(&["limited"]);
+    let addr = spawn_app_with_observer(
+        settings(vec![rpc("limited", limited.uri())]),
+        observer.clone(),
+    )
+    .await;
+
+    post(&addr).await;
+
+    let stats = observer.snapshot(&ids[0]).unwrap();
+    assert_eq!(stats.rpc_error, 1);
+    assert_eq!(stats.success, 0, "the HTTP status was 200 and it still is");
+    assert_eq!(stats.error_status, 0);
+    assert_eq!(stats.unreachable, 0);
+    assert_eq!(stats.read_failed, 0);
 }

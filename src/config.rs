@@ -10,19 +10,49 @@ const DEFAULT_CONFIG_FILE: &str = "settings.yaml";
 const CONFIG_PATH_ENV: &str = "RPC_CONFIG_PATH";
 
 #[derive(serde::Deserialize)]
-pub struct Settings {
-    pub rpcs: Vec<RpcSettings>,
-    pub application_host: String,
-    pub application_port: u16,
+pub struct ProxySettings {
     pub max_attempt: u64,
-    pub rpc_timeout_in_secs: u64,
     pub retry_after_in_secs: u64,
+    pub rpc_timeout_in_secs: u64,
+}
+#[derive(serde::Deserialize)]
+pub struct ApplicationSettings {
+    pub port: u16,
+    pub host: String,
+    pub proxy: ProxySettings,
+}
+#[derive(serde::Deserialize)]
+pub struct Settings {
+    pub application: ApplicationSettings,
+    #[serde(alias = "rpcs")]
+    pub upstreams: Vec<UpstreamSettings>,
+    /// Deprecated spelling of `application.proxy.rpc_timeout_in_secs`.
+    #[serde(default, rename = "rpc_timeout_in_secs")]
+    pub legacy_rpc_timeout_in_secs: Option<u64>,
+    pub decider: DeciderKind,
+}
+
+#[derive(serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DeciderKind {
+    RoundRobin,
+    PreferLeastErrors,
+}
+
+impl DeciderKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeciderKind::RoundRobin => "ROUND_ROBIN",
+            DeciderKind::PreferLeastErrors => "PREFER_LEAST_ERRORS",
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
-pub struct RpcSettings {
+pub struct UpstreamSettings {
     pub label: String,
-    pub rpc_url: String,
+    #[serde(alias = "rpc_url")]
+    pub url: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -31,15 +61,15 @@ pub enum SettingsError {
     UnsetEnvVar(String),
     #[error("upstream {label} still holds an unexpanded ${{...}} placeholder")]
     ResidualPlaceholder { label: String },
-    #[error("rpcs must not be empty")]
-    EmptyRpcs,
-    #[error("rpcs[{index}] has an empty label")]
+    #[error("upstreams must not be empty")]
+    EmptyUpstreams,
+    #[error("upstreams[{index}] has an empty label")]
     EmptyLabel { index: usize },
-    #[error("upstream {label} has an empty rpc_url")]
+    #[error("upstream {label} has an empty url")]
     EmptyUrl { label: String },
     #[error("duplicate label {0}")]
     DuplicateLabel(String),
-    #[error("upstreams {first} and {second} share an rpc_url")]
+    #[error("upstreams {first} and {second} share an url")]
     DuplicateUrl { first: String, second: String },
 }
 
@@ -58,30 +88,43 @@ where
     S: Source + Send + Sync + 'static,
 {
     let mut settings = Config::builder()
-        .set_default("application_host", "127.0.0.1")?
-        .set_default("max_attempt", 3)?
-        .set_default("rpc_timeout_in_secs", 3)?
-        .set_default("retry_after_in_secs", 1)?
+        .set_default("application.host", "127.0.0.1")?
+        .set_default("application.proxy.max_attempt", 3)?
+        .set_default("application.proxy.retry_after_in_secs", 1)?
+        .set_default("application.proxy.rpc_timeout_in_secs", 3)?
+        .set_default("decider", "ROUND_ROBIN")?
         .add_source(source)
         .build()?
         .try_deserialize::<Settings>()
         .context("invalid settings")?;
 
+    apply_legacy_keys(&mut settings);
     expand_env(&mut settings, get).context("invalid settings")?;
     validate_settings(&settings).context("invalid settings")?;
 
     Ok(settings)
 }
 
+fn apply_legacy_keys(settings: &mut Settings) {
+    if let Some(rpc_timeout_in_secs) = settings.legacy_rpc_timeout_in_secs {
+        tracing::warn!(
+            event = "config_key_deprecated",
+            key = "rpc_timeout_in_secs",
+            replacement = "application.proxy.rpc_timeout_in_secs",
+        );
+        settings.application.proxy.rpc_timeout_in_secs = rpc_timeout_in_secs;
+    }
+}
+
 fn expand_env(
     settings: &mut Settings,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Result<(), SettingsError> {
-    settings.application_host = expand_str(&settings.application_host, get)?;
+    settings.application.host = expand_str(&settings.application.host, get)?;
 
-    for rpc in &mut settings.rpcs {
+    for rpc in &mut settings.upstreams {
         rpc.label = expand_str(&rpc.label, get)?;
-        rpc.rpc_url = expand_str(&rpc.rpc_url, get)?;
+        rpc.url = expand_str(&rpc.url, get)?;
     }
 
     Ok(())
@@ -118,23 +161,23 @@ fn expand_str(raw: &str, get: &dyn Fn(&str) -> Option<String>) -> Result<String,
 }
 
 fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
-    if settings.rpcs.is_empty() {
-        return Err(SettingsError::EmptyRpcs);
+    if settings.upstreams.is_empty() {
+        return Err(SettingsError::EmptyUpstreams);
     }
 
     let mut labels: HashSet<&str> = HashSet::new();
     let mut urls: HashMap<&str, &str> = HashMap::new();
 
-    for (index, rpc) in settings.rpcs.iter().enumerate() {
+    for (index, rpc) in settings.upstreams.iter().enumerate() {
         if rpc.label.trim().is_empty() {
             return Err(SettingsError::EmptyLabel { index });
         }
-        if rpc.rpc_url.trim().is_empty() {
+        if rpc.url.trim().is_empty() {
             return Err(SettingsError::EmptyUrl {
                 label: rpc.label.clone(),
             });
         }
-        if rpc.label.contains("${") || rpc.rpc_url.contains("${") {
+        if rpc.label.contains("${") || rpc.url.contains("${") {
             return Err(SettingsError::ResidualPlaceholder {
                 label: rpc.label.clone(),
             });
@@ -142,7 +185,7 @@ fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
         if !labels.insert(rpc.label.as_str()) {
             return Err(SettingsError::DuplicateLabel(rpc.label.clone()));
         }
-        if let Some(first) = urls.insert(rpc.rpc_url.as_str(), rpc.label.as_str()) {
+        if let Some(first) = urls.insert(rpc.url.as_str(), rpc.label.as_str()) {
             return Err(SettingsError::DuplicateUrl {
                 first: first.to_string(),
                 second: rpc.label.clone(),
@@ -160,10 +203,11 @@ mod tests {
 
     /// Only the two required keys, so every optional falls through to its default.
     const MINIMAL: &str = r#"
-application_port: 8080
-rpcs:
+upstreams:
   - label: one
-    rpc_url: http://127.0.0.1:9001
+    url: http://127.0.0.1:9001
+application:
+  port: 8080
 "#;
 
     fn parse(yaml: &str) -> Result<Settings> {
@@ -188,11 +232,12 @@ rpcs:
         }
     }
 
-    fn rpcs(entries: &[(&str, &str)]) -> String {
-        let mut yaml = String::from("application_port: 8080\nrpcs:\n");
+    fn upstreams(entries: &[(&str, &str)]) -> String {
+        let mut yaml = String::from("upstreams:\n");
         for (label, url) in entries {
-            yaml.push_str(&format!("  - label: {label}\n    rpc_url: {url}\n"));
+            yaml.push_str(&format!("  - label: {label}\n    url: {url}\n"));
         }
+        yaml.push_str("application:\n  port: 8080\n");
         yaml
     }
 
@@ -200,51 +245,96 @@ rpcs:
     fn optional_fields_fall_back_to_their_defaults() {
         let settings = parse(MINIMAL).expect("the minimal config should load");
 
-        assert_eq!(settings.application_host, "127.0.0.1");
-        assert_eq!(settings.max_attempt, 3);
-        assert_eq!(settings.rpc_timeout_in_secs, 3);
-        assert_eq!(settings.retry_after_in_secs, 1);
+        assert_eq!(settings.application.host, "127.0.0.1");
+        assert_eq!(settings.application.proxy.max_attempt, 3);
+        assert_eq!(settings.application.proxy.rpc_timeout_in_secs, 3);
+        assert_eq!(settings.application.proxy.retry_after_in_secs, 1);
+        assert_eq!(settings.decider, DeciderKind::RoundRobin);
+    }
+
+    #[test]
+    fn the_timeout_is_read_from_the_proxy_block() {
+        let yaml = format!("{MINIMAL}  proxy:\n    rpc_timeout_in_secs: 9\n");
+        let settings = parse(&yaml).expect("the config should load");
+
+        assert_eq!(settings.application.proxy.rpc_timeout_in_secs, 9);
+        assert_eq!(settings.legacy_rpc_timeout_in_secs, None);
+    }
+
+    #[test]
+    fn the_legacy_top_level_timeout_still_wins() {
+        let yaml = format!("{MINIMAL}rpc_timeout_in_secs: 9\n");
+        let settings = parse(&yaml).expect("the config should load");
+
+        assert_eq!(settings.application.proxy.rpc_timeout_in_secs, 9);
+    }
+
+    #[test]
+    fn the_legacy_upstream_keys_still_load() {
+        let yaml = "application:\n  port: 8080\nrpcs:\n  - label: one\n    rpc_url: http://127.0.0.1:9001\n";
+        let settings = parse(yaml).expect("the config should load");
+
+        assert_eq!(settings.upstreams[0].label, "one");
+        assert_eq!(settings.upstreams[0].url, "http://127.0.0.1:9001");
+    }
+
+    #[test]
+    fn the_decider_is_read_by_its_configured_spelling() {
+        let yaml = format!("{MINIMAL}decider: PREFER_LEAST_ERRORS\n");
+        let settings = parse(&yaml).expect("the config should load");
+
+        assert_eq!(settings.decider, DeciderKind::PreferLeastErrors);
+    }
+
+    /// `config` writes its own message here and does not list the valid variants,
+    /// so the assertion is on the key and the offending value.
+    #[test]
+    fn an_unrecognised_decider_is_rejected_by_name() {
+        let error = error_of(&format!("{MINIMAL}decider: LEAST_LATENCY\n"), &[]);
+
+        assert!(error.contains("LEAST_LATENCY"), "{error}");
+        assert!(error.contains("decider"), "{error}");
     }
 
     /// The default must not be sticky: a container has to be able to widen it.
     #[test]
     fn an_explicit_host_overrides_the_loopback_default() {
-        let yaml = format!("{MINIMAL}application_host: 0.0.0.0\n");
+        let yaml = format!("{MINIMAL}  host: 0.0.0.0\n");
         let settings = parse(&yaml).expect("the config should load");
 
-        assert_eq!(settings.application_host, "0.0.0.0");
+        assert_eq!(settings.application.host, "0.0.0.0");
     }
 
     #[test]
     fn a_missing_port_is_an_error() {
-        let yaml = "rpcs:\n  - label: one\n    rpc_url: http://127.0.0.1:9001\n";
+        let yaml = "upstreams:\n  - label: one\n    url: http://127.0.0.1:9001\n";
 
-        assert!(parse(yaml).is_err(), "application_port has no default");
+        assert!(parse(yaml).is_err(), "application.port has no default");
     }
 
     #[test]
     fn missing_upstreams_are_an_error() {
         assert!(
-            parse("application_port: 8080\n").is_err(),
-            "rpcs has no default"
+            parse("application:\n  port: 8080\n").is_err(),
+            "upstreams has no default"
         );
     }
 
     #[test]
     fn an_empty_upstream_list_is_an_error() {
-        let error = error_of("application_port: 8080\nrpcs: []\n", &[]);
+        let error = error_of("application:\n  port: 8080\nupstreams: []\n", &[]);
 
-        assert!(error.contains("rpcs must not be empty"), "{error}");
+        assert!(error.contains("upstreams must not be empty"), "{error}");
     }
 
     #[test]
     fn a_placeholder_is_expanded_from_the_environment() {
-        let yaml = rpcs(&[("one", "https://provider.example/v2/${ALCHEMY_KEY}")]);
+        let yaml = upstreams(&[("one", "https://provider.example/v2/${ALCHEMY_KEY}")]);
         let settings =
             parse_with_env(&yaml, &[("ALCHEMY_KEY", "secret")]).expect("the config should load");
 
         assert_eq!(
-            settings.rpcs[0].rpc_url,
+            settings.upstreams[0].url,
             "https://provider.example/v2/secret"
         );
     }
@@ -252,8 +342,8 @@ rpcs:
     #[test]
     fn every_string_field_is_expanded() {
         let yaml = format!(
-            "{}application_host: ${{HOST}}\n",
-            rpcs(&[("${NAME}", "https://provider.example/${A}/${B}")])
+            "{}  host: ${{HOST}}\n",
+            upstreams(&[("${NAME}", "https://provider.example/${A}/${B}")])
         );
         let settings = parse_with_env(
             &yaml,
@@ -266,26 +356,26 @@ rpcs:
         )
         .expect("the config should load");
 
-        assert_eq!(settings.application_host, "0.0.0.0");
-        assert_eq!(settings.rpcs[0].label, "alchemy");
-        assert_eq!(settings.rpcs[0].rpc_url, "https://provider.example/v2/key");
+        assert_eq!(settings.application.host, "0.0.0.0");
+        assert_eq!(settings.upstreams[0].label, "alchemy");
+        assert_eq!(settings.upstreams[0].url, "https://provider.example/v2/key");
     }
 
     #[test]
     fn a_bare_dollar_variable_is_left_alone() {
-        let yaml = rpcs(&[("one", "https://provider.example/$ALCHEMY_KEY")]);
+        let yaml = upstreams(&[("one", "https://provider.example/$ALCHEMY_KEY")]);
         let settings =
             parse_with_env(&yaml, &[("ALCHEMY_KEY", "secret")]).expect("the config should load");
 
         assert_eq!(
-            settings.rpcs[0].rpc_url,
+            settings.upstreams[0].url,
             "https://provider.example/$ALCHEMY_KEY"
         );
     }
 
     #[test]
     fn an_unset_variable_fails_startup_and_names_the_variable() {
-        let yaml = rpcs(&[("one", "https://provider.example/v2/${ALCHEMY_KEY}")]);
+        let yaml = upstreams(&[("one", "https://provider.example/v2/${ALCHEMY_KEY}")]);
         let error = error_of(&yaml, &[]);
 
         assert!(error.contains("ALCHEMY_KEY"), "{error}");
@@ -294,7 +384,7 @@ rpcs:
 
     #[test]
     fn an_empty_variable_counts_as_unset() {
-        let yaml = rpcs(&[("one", "https://provider.example/v2/${ALCHEMY_KEY}")]);
+        let yaml = upstreams(&[("one", "https://provider.example/v2/${ALCHEMY_KEY}")]);
         let error = error_of(&yaml, &[("ALCHEMY_KEY", "")]);
 
         assert!(error.contains("ALCHEMY_KEY"), "{error}");
@@ -302,7 +392,7 @@ rpcs:
 
     #[test]
     fn an_expansion_failure_never_reveals_the_url() {
-        let yaml = rpcs(&[(
+        let yaml = upstreams(&[(
             "alchemy",
             "https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_KEY}",
         )]);
@@ -314,7 +404,7 @@ rpcs:
 
     #[test]
     fn an_unterminated_placeholder_is_rejected_by_label() {
-        let yaml = rpcs(&[("alchemy", "https://provider.example/v2/${ALCHEMY_KEY")]);
+        let yaml = upstreams(&[("alchemy", "https://provider.example/v2/${ALCHEMY_KEY")]);
         let error = error_of(&yaml, &[("ALCHEMY_KEY", "secret")]);
 
         assert!(error.contains("alchemy"), "{error}");
@@ -324,7 +414,7 @@ rpcs:
 
     #[test]
     fn a_duplicate_label_is_an_error() {
-        let yaml = rpcs(&[
+        let yaml = upstreams(&[
             ("one", "https://provider.example/a"),
             ("one", "https://provider.example/b"),
         ]);
@@ -336,7 +426,7 @@ rpcs:
     /// The two labels identify the offending entries; the shared URL holds the key.
     #[test]
     fn a_duplicate_url_names_both_labels_and_neither_url() {
-        let yaml = rpcs(&[
+        let yaml = upstreams(&[
             ("alchemy", "https://eth-mainnet.g.alchemy.com/v2/key"),
             ("alchemy-2", "https://eth-mainnet.g.alchemy.com/v2/key"),
         ]);
@@ -351,7 +441,7 @@ rpcs:
 
     #[test]
     fn an_empty_label_is_an_error() {
-        let yaml = rpcs(&[("\"\"", "https://provider.example/a")]);
+        let yaml = upstreams(&[("\"\"", "https://provider.example/a")]);
         let error = error_of(&yaml, &[]);
 
         assert!(error.contains("empty label"), "{error}");
@@ -359,9 +449,9 @@ rpcs:
 
     #[test]
     fn an_empty_url_is_an_error() {
-        let yaml = rpcs(&[("one", "\"\"")]);
+        let yaml = upstreams(&[("one", "\"\"")]);
         let error = error_of(&yaml, &[]);
 
-        assert!(error.contains("empty rpc_url"), "{error}");
+        assert!(error.contains("empty url"), "{error}");
     }
 }

@@ -58,7 +58,7 @@ async fn works_fine_when_one_uptream_works() {
     let a = mock_rpc_server::ok("0xa").await;
     let b = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
     let mut settings = test_settings(vec![rpc("one", a.uri()), rpc("two", b.uri())]);
-    settings.retry_after_in_secs = 0;
+    settings.application.proxy.retry_after_in_secs = 0;
     let addr = spawn_app(settings).await;
 
     let client = reqwest::Client::new();
@@ -86,8 +86,8 @@ async fn non_works_fine_retry_and_propagate_last_error() {
     let a = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
     let b = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
     let mut settings = test_settings(vec![rpc("one", a.uri()), rpc("two", b.uri())]);
-    settings.max_attempt = 2;
-    settings.retry_after_in_secs = 0;
+    settings.application.proxy.max_attempt = 2;
+    settings.application.proxy.retry_after_in_secs = 0;
     let addr = spawn_app(settings).await;
 
     let client = reqwest::Client::new();
@@ -116,8 +116,8 @@ async fn non_works_fine_retry_and_propagate_last_error() {
 async fn single_upstream_is_tried_once() {
     let a = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
     let mut settings = test_settings(vec![rpc("one", a.uri())]);
-    settings.max_attempt = 3;
-    settings.retry_after_in_secs = 3;
+    settings.application.proxy.max_attempt = 3;
+    settings.application.proxy.retry_after_in_secs = 3;
     let addr = spawn_app(settings).await;
 
     let started_at = Instant::now();
@@ -140,4 +140,29 @@ async fn single_upstream_is_tried_once() {
         elapsed < std::time::Duration::from_secs(1),
         "answered in {elapsed:?}, expected no retry_after sleep"
     );
+}
+
+/// The throttled upstream answers HTTP 200, so only the decoded body marks it as
+/// a failure the chain should move past.
+#[tokio::test]
+async fn a_json_rpc_error_moves_to_the_next_upstream() {
+    let limited = mock_rpc_server::rpc_erroring(-32005, "limit exceeded").await;
+    let live = mock_rpc_server::ok("0xb").await;
+    let mut settings = test_settings(vec![rpc("one", limited.uri()), rpc("two", live.uri())]);
+    settings.application.proxy.retry_after_in_secs = 0;
+    let addr = spawn_app(settings).await;
+
+    let res = reqwest::Client::new()
+        .post(format!("{addr}/rpc"))
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), 200);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["result"], "0xb");
+
+    assert_eq!(limited.received_requests().await.unwrap().len(), 1);
+    assert_eq!(live.received_requests().await.unwrap().len(), 1);
 }

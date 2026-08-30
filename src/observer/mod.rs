@@ -1,83 +1,23 @@
+pub mod prometheus;
+pub mod snapshot;
+
 use std::{
     collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::Ordering},
 };
 
 use tracing::warn;
 
-use crate::upstream::{CallError, CallRecord, UpstreamId};
+use crate::{
+    observer::snapshot::{BUCKET_BOUNDS_MICROS, Snapshot, UpstreamStats},
+    upstream::{
+        UpstreamId,
+        call::{CallError, CallRecord},
+    },
+};
 
 pub trait Observer: Send + Sync + 'static {
     fn record(&self, upstream: &UpstreamId, record: CallRecord<'_>);
-}
-
-#[derive(Default)]
-pub struct NoopObserver {}
-
-impl NoopObserver {
-    pub fn new() -> Self {
-        NoopObserver::default()
-    }
-}
-
-impl Observer for NoopObserver {
-    fn record(&self, upstream: &UpstreamId, record: CallRecord<'_>) {
-        let _upstream = upstream;
-        let _record = record;
-    }
-}
-
-pub const BUCKET_BOUNDS_MICROS: [u64; 10] = [
-    5_000,     // 0.005  local node floor
-    10_000,    // 0.01
-    25_000,    // 0.025
-    50_000,    // 0.05
-    100_000,   // 0.1
-    250_000,   // 0.25
-    500_000,   // 0.5
-    1_000_000, // 1.0
-    3_000_000, // 3.0   = DEFAULT_RPC_TIMEOUT_IN_SECS
-    5_000_000, // 5.0   timeout fired late
-];
-
-#[derive(Default)]
-pub struct UpstreamStats {
-    pub success: AtomicU64,
-    pub unreachable: AtomicU64,
-    pub read_failed: AtomicU64,
-    pub error_status: AtomicU64,
-
-    pub buckets: [AtomicU64; BUCKET_BOUNDS_MICROS.len()],
-    pub duration_micros_total: AtomicU64,
-}
-
-impl UpstreamStats {
-    pub fn snapshot(&self) -> StatsSnapshot {
-        StatsSnapshot {
-            success: self.success.load(Ordering::Relaxed),
-            unreachable: self.unreachable.load(Ordering::Relaxed),
-            read_failed: self.read_failed.load(Ordering::Relaxed),
-            error_status: self.error_status.load(Ordering::Relaxed),
-            buckets: self
-                .buckets
-                .each_ref()
-                .map(|bucket| bucket.load(Ordering::Relaxed)),
-            duration_micros_total: self.duration_micros_total.load(Ordering::Relaxed),
-        }
-    }
-}
-
-pub struct StatsSnapshot {
-    pub success: u64,
-    pub unreachable: u64,
-    pub read_failed: u64,
-    pub error_status: u64,
-
-    pub buckets: [u64; BUCKET_BOUNDS_MICROS.len()],
-    pub duration_micros_total: u64,
 }
 
 pub struct MetricsObserver {
@@ -94,17 +34,25 @@ impl MetricsObserver {
     }
 
     /// `None` for an upstream this observer was not built with.
-    pub fn snapshot(&self, upstream: &UpstreamId) -> Option<StatsSnapshot> {
+    pub fn snapshot(&self, upstream: &UpstreamId) -> Option<Snapshot> {
         Some(self.stats.get(upstream)?.snapshot())
     }
 
-    pub fn snapshots(&self) -> Vec<(&UpstreamId, StatsSnapshot)> {
+    pub fn snapshots(&self) -> Vec<(&UpstreamId, Snapshot)> {
         let mut out: Vec<_> = self
             .stats
             .iter()
             .map(|(upstream_id, stat)| (upstream_id, stat.snapshot()))
             .collect();
         out.sort_unstable_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+        out
+    }
+
+    pub fn snapshot_map(&self) -> HashMap<UpstreamId, Snapshot> {
+        let mut out = HashMap::new();
+        for (upstream_id, stat) in self.stats.iter() {
+            out.insert(upstream_id.clone(), stat.snapshot());
+        }
         out
     }
 }
@@ -120,6 +68,7 @@ impl Observer for MetricsObserver {
             Err(CallError::ErrorStatus { .. }) => &stat.error_status,
             Err(CallError::ReadFailed { .. }) => &stat.read_failed,
             Err(CallError::Unreachable { .. }) => &stat.unreachable,
+            Err(CallError::RpcError { .. }) => &stat.rpc_error,
         };
 
         counter.fetch_add(1, Ordering::Relaxed);
