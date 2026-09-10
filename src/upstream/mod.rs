@@ -46,6 +46,7 @@ pub struct Upstream {
     http: reqwest::Client,
     url: String,
     id: UpstreamId,
+    timeout: Duration,
 }
 
 impl fmt::Debug for Upstream {
@@ -84,14 +85,13 @@ impl Upstream {
             return Err(BuildError::ZeroTimeout);
         }
 
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(rpc_timeout_in_secs))
-            .build()?;
+        let http = reqwest::Client::builder().build()?;
 
         Ok(Upstream {
             http,
             url,
             id: UpstreamId::new(label),
+            timeout: Duration::from_secs(rpc_timeout_in_secs),
         })
     }
 }
@@ -107,6 +107,7 @@ impl Upstream {
             .post(&self.url)
             .header(header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
             .body(body.to_owned())
+            .timeout(self.timeout)
             .send()
             .await
     }
