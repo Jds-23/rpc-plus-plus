@@ -107,6 +107,7 @@ fn upstream(label: &str) -> Upstream {
     Upstream::builder()
         .label(label)
         .url(format!("http://{label}.invalid"))
+        .http(reqwest::Client::new())
         .build()
         .expect("upstream build failed")
 }

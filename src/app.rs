@@ -12,7 +12,7 @@ use crate::{
     http,
     observer::{MetricsObserver, prometheus::Collector},
     proxy::Pipeline,
-    upstream::{Upstream, build_all},
+    upstream::{Upstream, build_all, build_http_client},
 };
 
 pub struct Application {
@@ -121,8 +121,11 @@ pub fn build_decider(
 pub async fn build(settings: Settings, shutdown: &CancellationToken) -> Result<Application> {
     let mut tasks = JoinSet::new();
 
+    let http = build_http_client(&settings.application.proxy)
+        .context("failed to build the HTTP client")?;
     let upstreams = build_all(
         settings.upstreams,
+        http,
         settings.application.proxy.rpc_timeout_in_secs,
     );
     let observer = Arc::new(MetricsObserver::new(

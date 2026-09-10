@@ -11,7 +11,7 @@ use rpc_plus_plus::{
     config::{ApplicationSettings, DeciderKind, ProxySettings, Settings, UpstreamSettings},
     decider::{Decider, prefer_least_errors::PreferLeastErrors, round_robin::RoundRobin},
     observer::MetricsObserver,
-    upstream::{Upstream, UpstreamId, build_all},
+    upstream::{Upstream, UpstreamId, build_all, build_http_client},
 };
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -53,7 +53,13 @@ pub fn upstreams(settings: &Settings) -> Vec<Upstream> {
         .map(|entry| rpc(&entry.label, entry.url.clone()))
         .collect();
 
-    build_all(upstreams, settings.application.proxy.rpc_timeout_in_secs)
+    let http = build_http_client(&settings.application.proxy).expect("http client build failed");
+
+    build_all(
+        upstreams,
+        http,
+        settings.application.proxy.rpc_timeout_in_secs,
+    )
 }
 
 fn round_robin(settings: &Settings) -> Arc<dyn Decider> {

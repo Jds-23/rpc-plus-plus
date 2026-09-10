@@ -7,15 +7,20 @@ use std::{
 };
 
 use axum::body::Bytes;
-use reqwest::{StatusCode, header};
+use reqwest::{Client, ClientBuilder, StatusCode, header};
 
 use crate::{
-    config::UpstreamSettings,
+    config::{ProxySettings, UpstreamSettings},
     jsonrpc::rpc_fault_in,
     upstream::call::{CallError, CallOutcome, CallResult, error_chain},
 };
 
 const DEFAULT_RPC_TIMEOUT_IN_SECS: u64 = 3;
+
+/// Pool knobs for the one shared client. Idle caps are per-host, and every
+/// upstream shares this pool once `Upstream` stops building its own.
+const POOL_MAX_IDLE_PER_HOST: usize = 32;
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct UpstreamId(Arc<str>);
@@ -73,6 +78,7 @@ impl Upstream {
     pub fn new(
         #[builder(into)] label: String,
         #[builder(into)] url: String,
+        #[builder(into)] http: reqwest::Client,
         #[builder(default = DEFAULT_RPC_TIMEOUT_IN_SECS)] rpc_timeout_in_secs: u64,
     ) -> Result<Self, BuildError> {
         if label.trim().is_empty() {
@@ -84,8 +90,6 @@ impl Upstream {
         if rpc_timeout_in_secs == 0 {
             return Err(BuildError::ZeroTimeout);
         }
-
-        let http = reqwest::Client::builder().build()?;
 
         Ok(Upstream {
             http,
@@ -153,7 +157,7 @@ impl Upstream {
     }
 }
 
-pub fn build_all<I>(upstreams: I, rpc_timeout_in_secs: u64) -> Vec<Upstream>
+pub fn build_all<I>(upstreams: I, http: reqwest::Client, rpc_timeout_in_secs: u64) -> Vec<Upstream>
 where
     I: IntoIterator<Item = UpstreamSettings>,
 {
@@ -161,6 +165,7 @@ where
         .into_iter()
         .filter_map(|item| {
             Upstream::builder()
+                .http(http.clone())
                 .label(item.label.clone())
                 .url(item.url)
                 .rpc_timeout_in_secs(rpc_timeout_in_secs)
@@ -175,4 +180,12 @@ where
                 .ok()
         })
         .collect()
+}
+
+pub fn build_http_client(settings: &ProxySettings) -> Result<Client, reqwest::Error> {
+    ClientBuilder::new()
+        .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
+        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        .connect_timeout(Duration::from_secs(settings.rpc_timeout_in_secs))
+        .build()
 }
