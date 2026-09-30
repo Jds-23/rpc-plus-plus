@@ -10,10 +10,17 @@ const DEFAULT_CONFIG_FILE: &str = "settings.yaml";
 const CONFIG_PATH_ENV: &str = "RPC_CONFIG_PATH";
 
 #[derive(serde::Deserialize)]
+pub struct HedgeSettings {
+    pub enabled: bool,
+    pub after_in_millis: u64,
+}
+
+#[derive(serde::Deserialize)]
 pub struct ProxySettings {
     pub max_attempt: u64,
     pub retry_after_in_secs: u64,
     pub rpc_timeout_in_secs: u64,
+    pub hedge: HedgeSettings,
 }
 #[derive(serde::Deserialize)]
 pub struct ApplicationSettings {
@@ -53,6 +60,9 @@ pub struct UpstreamSettings {
     pub label: String,
     #[serde(alias = "rpc_url")]
     pub url: String,
+    /// Overrides `application.proxy.hedge.after_in_millis` for this upstream.
+    #[serde(default)]
+    pub hedge_after_in_millis: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -71,6 +81,10 @@ pub enum SettingsError {
     DuplicateLabel(String),
     #[error("upstreams {first} and {second} share an url")]
     DuplicateUrl { first: String, second: String },
+    #[error("hedge.after_in_millis must be at least 1")]
+    ZeroHedgeAfter,
+    #[error("upstream {label} has hedge_after_in_millis 0, must be at least 1")]
+    ZeroUpstreamHedgeAfter { label: String },
 }
 
 pub fn get_settings() -> Result<Settings> {
@@ -92,6 +106,8 @@ where
         .set_default("application.proxy.max_attempt", 3)?
         .set_default("application.proxy.retry_after_in_secs", 1)?
         .set_default("application.proxy.rpc_timeout_in_secs", 3)?
+        .set_default("application.proxy.hedge.enabled", false)?
+        .set_default("application.proxy.hedge.after_in_millis", 250)?
         .set_default("decider", "ROUND_ROBIN")?
         .add_source(source)
         .build()?
@@ -165,6 +181,12 @@ fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
         return Err(SettingsError::EmptyUpstreams);
     }
 
+    let proxy = &settings.application.proxy;
+    if proxy.hedge.after_in_millis == 0 {
+        return Err(SettingsError::ZeroHedgeAfter);
+    }
+    let rpc_timeout_in_millis = proxy.rpc_timeout_in_secs.saturating_mul(1000);
+
     let mut labels: HashSet<&str> = HashSet::new();
     let mut urls: HashMap<&str, &str> = HashMap::new();
 
@@ -190,6 +212,25 @@ fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
                 first: first.to_string(),
                 second: rpc.label.clone(),
             });
+        }
+
+        let hedge_after_in_millis = match rpc.hedge_after_in_millis {
+            Some(0) => {
+                return Err(SettingsError::ZeroUpstreamHedgeAfter {
+                    label: rpc.label.clone(),
+                });
+            }
+            Some(millis) => millis,
+            None => proxy.hedge.after_in_millis,
+        };
+        // Allowed, but the timeout fires first so this upstream never hedges.
+        if hedge_after_in_millis >= rpc_timeout_in_millis {
+            tracing::warn!(
+                event = "hedge_after_unreachable",
+                upstream = %rpc.label,
+                hedge_after_in_millis,
+                rpc_timeout_in_millis,
+            );
         }
     }
 
@@ -250,6 +291,46 @@ application:
         assert_eq!(settings.application.proxy.rpc_timeout_in_secs, 3);
         assert_eq!(settings.application.proxy.retry_after_in_secs, 1);
         assert_eq!(settings.decider, DeciderKind::RoundRobin);
+        assert!(!settings.application.proxy.hedge.enabled);
+        assert_eq!(settings.application.proxy.hedge.after_in_millis, 250);
+        assert_eq!(settings.upstreams[0].hedge_after_in_millis, None);
+    }
+
+    #[test]
+    fn the_hedge_is_read_from_the_proxy_block() {
+        let yaml = format!(
+            "{MINIMAL}  proxy:\n    hedge:\n      enabled: true\n      after_in_millis: 400\n"
+        );
+        let settings = parse(&yaml).expect("the config should load");
+
+        assert!(settings.application.proxy.hedge.enabled);
+        assert_eq!(settings.application.proxy.hedge.after_in_millis, 400);
+    }
+
+    #[test]
+    fn an_upstream_can_override_the_hedge_threshold() {
+        let yaml = "upstreams:\n  - label: one\n    url: http://127.0.0.1:9001\n    hedge_after_in_millis: 400\napplication:\n  port: 8080\n";
+        let settings = parse(yaml).expect("the config should load");
+
+        assert_eq!(settings.upstreams[0].hedge_after_in_millis, Some(400));
+    }
+
+    #[test]
+    fn a_zero_hedge_threshold_is_an_error() {
+        let yaml = format!("{MINIMAL}  proxy:\n    hedge:\n      after_in_millis: 0\n");
+        let error = error_of(&yaml, &[]);
+
+        assert!(error.contains("after_in_millis"), "{error}");
+    }
+
+    #[test]
+    fn a_zero_upstream_hedge_threshold_is_rejected_by_label() {
+        let yaml = "upstreams:\n  - label: alchemy\n    url: https://eth-mainnet.g.alchemy.com/v2/key\n    hedge_after_in_millis: 0\napplication:\n  port: 8080\n";
+        let error = error_of(yaml, &[]);
+
+        assert!(error.contains("alchemy"), "{error}");
+        assert!(error.contains("hedge_after_in_millis"), "{error}");
+        assert!(!error.contains("alchemy.com"), "{error}");
     }
 
     #[test]

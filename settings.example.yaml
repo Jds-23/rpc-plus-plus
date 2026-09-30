@@ -12,10 +12,17 @@ application:
     max_attempt: 3
     retry_after_in_secs: 1
     rpc_timeout_in_secs: 3
+    # Off by default. When on, a second upstream is raced once the first has not
+    # answered within after_in_millis.
+    # hedge:
+    #   enabled: false
+    #   after_in_millis: 250
 
 upstreams:
   - label: alchemy
     url: https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_KEY}
+    # Optional, overrides application.proxy.hedge.after_in_millis for this upstream.
+    # hedge_after_in_millis: 400
   - label: drpc
     url: https://eth.drpc.org
   - label: blockrazor

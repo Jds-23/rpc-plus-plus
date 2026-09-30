@@ -8,7 +8,9 @@ use std::{sync::Arc, time::Duration};
 
 use rpc_plus_plus::{
     app::Application,
-    config::{ApplicationSettings, DeciderKind, ProxySettings, Settings, UpstreamSettings},
+    config::{
+        ApplicationSettings, DeciderKind, HedgeSettings, ProxySettings, Settings, UpstreamSettings,
+    },
     decider::{Decider, prefer_least_errors::PreferLeastErrors, round_robin::RoundRobin},
     observer::MetricsObserver,
     upstream::{Upstream, UpstreamId, build_all, build_http_client},
@@ -26,6 +28,10 @@ pub fn test_settings(upstreams: Vec<UpstreamSettings>) -> Settings {
                 max_attempt: 3,
                 retry_after_in_secs: 1,
                 rpc_timeout_in_secs: 1,
+                hedge: HedgeSettings {
+                    enabled: false,
+                    after_in_millis: 250,
+                },
             },
         },
         legacy_rpc_timeout_in_secs: None,
@@ -37,6 +43,7 @@ pub fn rpc(label: &str, url: impl Into<String>) -> UpstreamSettings {
     UpstreamSettings {
         label: label.to_string(),
         url: url.into(),
+        hedge_after_in_millis: None,
     }
 }
 
