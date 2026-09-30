@@ -77,6 +77,65 @@ fn is_retryable(code: i64, message: &[u8]) -> bool {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct MethodEnvelope<'a> {
+    #[serde(borrow)]
+    method: Cow<'a, str>,
+}
+
+// No byte prefilter: a skip can't prove `method` exists, and misses `\u` escapes.
+#[cfg_attr(not(test), expect(dead_code, reason = "called by the hedge racer"))]
+pub(crate) fn is_write(body: &Bytes) -> bool {
+    match serde_json::from_slice::<MethodEnvelope>(body) {
+        Ok(envelope) => !is_hedge_safe(&envelope.method),
+        // Batches, missing or non-string methods. Never hedge what we can't classify.
+        Err(_) => true,
+    }
+}
+
+// An allowlist, so an unknown write fails closed: a missing read only loses a hedge.
+// Filters are out on purpose — each node keeps its own, and polling one consumes it.
+fn is_hedge_safe(method: &str) -> bool {
+    matches!(
+        method,
+        "eth_blockNumber"
+            | "eth_call"
+            | "eth_chainId"
+            | "eth_estimateGas"
+            | "eth_createAccessList"
+            | "eth_feeHistory"
+            | "eth_gasPrice"
+            | "eth_maxPriorityFeePerGas"
+            | "eth_blobBaseFee"
+            | "eth_getBalance"
+            | "eth_getCode"
+            | "eth_getStorageAt"
+            | "eth_getProof"
+            | "eth_getTransactionCount"
+            | "eth_getLogs"
+            | "eth_getBlockByHash"
+            | "eth_getBlockByNumber"
+            | "eth_getBlockReceipts"
+            | "eth_getBlockTransactionCountByHash"
+            | "eth_getBlockTransactionCountByNumber"
+            | "eth_getTransactionByHash"
+            | "eth_getTransactionByBlockHashAndIndex"
+            | "eth_getTransactionByBlockNumberAndIndex"
+            | "eth_getTransactionReceipt"
+            | "eth_getUncleCountByBlockHash"
+            | "eth_getUncleCountByBlockNumber"
+            | "eth_getUncleByBlockHashAndIndex"
+            | "eth_getUncleByBlockNumberAndIndex"
+            | "eth_syncing"
+            | "eth_protocolVersion"
+            | "net_version"
+            | "net_listening"
+            | "net_peerCount"
+            | "web3_clientVersion"
+            | "web3_sha3"
+    )
+}
+
 pub(crate) fn rpc_error(code: i64, msg: &str) -> Response {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -142,5 +201,76 @@ mod tests {
     fn clean_result_never_reaches_the_parser() {
         let body = Bytes::from(r#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#);
         assert_eq!(rpc_fault_in(&body), None);
+    }
+
+    fn request(method: &str) -> Bytes {
+        Bytes::from(format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":[]}}"#
+        ))
+    }
+
+    #[test]
+    fn every_send_method_is_a_write() {
+        for method in [
+            "eth_sendRawTransaction",
+            "eth_sendTransaction",
+            "eth_sendRawTransactionConditional",
+            "eth_sendBundle",
+            "eth_sendPrivateTransaction",
+        ] {
+            assert!(is_write(&request(method)), "{method} should be a write");
+        }
+    }
+
+    #[test]
+    fn a_known_read_is_not_a_write() {
+        assert!(!is_write(&request("eth_call")));
+        assert!(!is_write(&request("eth_blockNumber")));
+    }
+
+    #[test]
+    fn an_unknown_method_counts_as_a_write() {
+        assert!(is_write(&request("eth_sendUserOperation")));
+    }
+
+    #[test]
+    fn an_unreadable_method_counts_as_a_write() {
+        for body in [
+            r#"{"jsonrpc":"2.0","id":1,"params":[]}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":7}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"eth_call""#,
+        ] {
+            assert!(is_write(&Bytes::from(body)), "{body} should be a write");
+        }
+    }
+
+    #[test]
+    fn a_send_method_inside_params_does_not_fool_the_guard() {
+        let body = Bytes::from(
+            r#"{"jsonrpc":"2.0","id":1,"method":"eth_call","params":["eth_sendRawTransaction"]}"#,
+        );
+        assert!(!is_write(&body));
+    }
+
+    #[test]
+    fn method_after_params_is_still_found() {
+        let body = Bytes::from(
+            "{ \"params\" : [\"0x1\"] ,\n  \"id\" : 1 ,\n  \"method\" : \"eth_sendRawTransaction\" }",
+        );
+        assert!(is_write(&body));
+    }
+
+    #[test]
+    fn escaped_method_is_decoded_before_the_check() {
+        let write = Bytes::from(r#"{"id":1,"method":"eth_sendRawTransaction"}"#);
+        let read = Bytes::from(r#"{"id":1,"method":"eth_call"}"#);
+        assert!(is_write(&write));
+        assert!(!is_write(&read));
+    }
+
+    #[test]
+    fn a_batch_counts_as_a_write() {
+        let body = Bytes::from(r#"[{"jsonrpc":"2.0","id":1,"method":"eth_call"}]"#);
+        assert!(is_write(&body));
     }
 }
