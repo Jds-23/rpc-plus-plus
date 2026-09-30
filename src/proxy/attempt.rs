@@ -15,12 +15,14 @@ pub(super) async fn try_once(
     upstream: &Upstream,
     body: &Bytes,
     attempt: u64,
+    hedge: bool,
 ) -> Result<Response, CallError> {
     let id = upstream.id();
     info!(
         event = "attempt_started",
         attempt,
         upstream = %id,
+        hedge,
     );
     let call = upstream.call(body).await;
     observer.record(id, call.record());
