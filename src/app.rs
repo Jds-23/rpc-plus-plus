@@ -46,6 +46,7 @@ impl Application {
             .observer(observer)
             .max_attempt(settings.proxy.max_attempt)
             .retry_after(Duration::from_secs(settings.proxy.retry_after_in_secs))
+            .hedging(settings.proxy.hedge.enabled)
             .build()?;
 
         let router = http::build_router(Arc::new(pipeline), Arc::new(registry));
