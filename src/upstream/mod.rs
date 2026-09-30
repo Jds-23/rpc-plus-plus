@@ -16,6 +16,7 @@ use crate::{
 };
 
 const DEFAULT_RPC_TIMEOUT_IN_SECS: u64 = 3;
+const DEFAULT_HEDGE_AFTER_IN_MILLIS: u64 = 250;
 
 /// Pool knobs for the one shared client. Idle caps are per-host, and every
 /// upstream shares this pool once `Upstream` stops building its own.
@@ -52,6 +53,7 @@ pub struct Upstream {
     url: String,
     id: UpstreamId,
     timeout: Duration,
+    hedge_after: Duration,
 }
 
 impl fmt::Debug for Upstream {
@@ -68,6 +70,8 @@ pub enum BuildError {
     EmptyUrl,
     #[error("rpc_timeout_in_secs must be at least 1")]
     ZeroTimeout,
+    #[error("hedge_after_in_millis must be at least 1")]
+    ZeroHedgeAfter,
     #[error("failed to build HTTP client: {0}")]
     HttpClient(#[from] reqwest::Error),
 }
@@ -80,6 +84,7 @@ impl Upstream {
         #[builder(into)] url: String,
         #[builder(into)] http: reqwest::Client,
         #[builder(default = DEFAULT_RPC_TIMEOUT_IN_SECS)] rpc_timeout_in_secs: u64,
+        #[builder(default = DEFAULT_HEDGE_AFTER_IN_MILLIS)] hedge_after_in_millis: u64,
     ) -> Result<Self, BuildError> {
         if label.trim().is_empty() {
             return Err(BuildError::EmptyLabel);
@@ -90,12 +95,16 @@ impl Upstream {
         if rpc_timeout_in_secs == 0 {
             return Err(BuildError::ZeroTimeout);
         }
+        if hedge_after_in_millis == 0 {
+            return Err(BuildError::ZeroHedgeAfter);
+        }
 
         Ok(Upstream {
             http,
             url,
             id: UpstreamId::new(label),
             timeout: Duration::from_secs(rpc_timeout_in_secs),
+            hedge_after: Duration::from_millis(hedge_after_in_millis),
         })
     }
 }
@@ -104,6 +113,11 @@ impl Upstream {
     /// Identity — what per-attempt records key on.
     pub fn id(&self) -> &UpstreamId {
         &self.id
+    }
+
+    /// How long to wait on this upstream before hedging to the next one.
+    pub fn hedge_after(&self) -> Duration {
+        self.hedge_after
     }
 
     async fn send(&self, body: &Bytes) -> Result<reqwest::Response, reqwest::Error> {
@@ -157,7 +171,9 @@ impl Upstream {
     }
 }
 
-pub fn build_all<I>(upstreams: I, http: reqwest::Client, rpc_timeout_in_secs: u64) -> Vec<Upstream>
+// TODO: refactor this API — it takes loose settings pieces and silently skips
+// upstreams that fail to build.
+pub fn build_all<I>(upstreams: I, http: reqwest::Client, proxy: &ProxySettings) -> Vec<Upstream>
 where
     I: IntoIterator<Item = UpstreamSettings>,
 {
@@ -168,7 +184,11 @@ where
                 .http(http.clone())
                 .label(item.label.clone())
                 .url(item.url)
-                .rpc_timeout_in_secs(rpc_timeout_in_secs)
+                .rpc_timeout_in_secs(proxy.rpc_timeout_in_secs)
+                .hedge_after_in_millis(
+                    item.hedge_after_in_millis
+                        .unwrap_or(proxy.hedge.after_in_millis),
+                )
                 .build()
                 .map_err(|err| {
                     tracing::warn!(
@@ -188,4 +208,79 @@ pub fn build_http_client(settings: &ProxySettings) -> Result<Client, reqwest::Er
         .pool_idle_timeout(POOL_IDLE_TIMEOUT)
         .connect_timeout(Duration::from_secs(settings.rpc_timeout_in_secs))
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::HedgeSettings;
+
+    fn builder_upstream(hedge_after_in_millis: Option<u64>) -> Result<Upstream, BuildError> {
+        Upstream::builder()
+            .label("one")
+            .url("http://one.invalid")
+            .http(Client::new())
+            .maybe_hedge_after_in_millis(hedge_after_in_millis)
+            .build()
+    }
+
+    fn proxy(after_in_millis: u64) -> ProxySettings {
+        ProxySettings {
+            max_attempt: 3,
+            retry_after_in_secs: 1,
+            rpc_timeout_in_secs: 3,
+            hedge: HedgeSettings {
+                enabled: true,
+                after_in_millis,
+            },
+        }
+    }
+
+    fn settings(label: &str, hedge_after_in_millis: Option<u64>) -> UpstreamSettings {
+        UpstreamSettings {
+            label: label.to_string(),
+            url: format!("http://{label}.invalid"),
+            hedge_after_in_millis,
+        }
+    }
+
+    #[test]
+    fn the_hedge_threshold_defaults_to_250ms() {
+        let upstream = builder_upstream(None).expect("upstream build failed");
+
+        assert_eq!(upstream.hedge_after(), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn an_explicit_hedge_threshold_is_kept() {
+        let upstream = builder_upstream(Some(400)).expect("upstream build failed");
+
+        assert_eq!(upstream.hedge_after(), Duration::from_millis(400));
+    }
+
+    #[test]
+    fn a_zero_hedge_threshold_is_rejected() {
+        let error = builder_upstream(Some(0)).expect_err("zero should be rejected");
+
+        assert!(matches!(error, BuildError::ZeroHedgeAfter), "{error}");
+    }
+
+    #[test]
+    fn an_upstream_override_wins_over_the_global_threshold() {
+        let upstreams = build_all([settings("one", Some(400))], Client::new(), &proxy(100));
+
+        assert_eq!(upstreams[0].hedge_after(), Duration::from_millis(400));
+    }
+
+    #[test]
+    fn an_upstream_without_override_falls_back_to_the_global_threshold() {
+        let upstreams = build_all(
+            [settings("one", Some(400)), settings("two", None)],
+            Client::new(),
+            &proxy(100),
+        );
+
+        assert_eq!(upstreams[1].id().as_str(), "two");
+        assert_eq!(upstreams[1].hedge_after(), Duration::from_millis(100));
+    }
 }

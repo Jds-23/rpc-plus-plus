@@ -57,16 +57,15 @@ pub fn upstreams(settings: &Settings) -> Vec<Upstream> {
     let upstreams: Vec<UpstreamSettings> = settings
         .upstreams
         .iter()
-        .map(|entry| rpc(&entry.label, entry.url.clone()))
+        .map(|entry| UpstreamSettings {
+            hedge_after_in_millis: entry.hedge_after_in_millis,
+            ..rpc(&entry.label, entry.url.clone())
+        })
         .collect();
 
     let http = build_http_client(&settings.application.proxy).expect("http client build failed");
 
-    build_all(
-        upstreams,
-        http,
-        settings.application.proxy.rpc_timeout_in_secs,
-    )
+    build_all(upstreams, http, &settings.application.proxy)
 }
 
 fn round_robin(settings: &Settings) -> Arc<dyn Decider> {
