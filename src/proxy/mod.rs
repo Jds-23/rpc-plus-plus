@@ -175,15 +175,23 @@ impl Pipeline {
     /// Staggered race over the chain. Reads only; writes go to `send_once`.
     async fn race<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
         let raced = race(chain, self.max_attempt, |upstream, start| {
+            if let Some(overtaken) = start.overtaken {
+                self.observer.record_hedge(overtaken.id(), upstream.id());
+            }
             try_once(
                 self.observer.as_ref(),
                 upstream,
                 body,
                 start.attempt,
-                start.hedge,
+                start.overtaken.is_some(),
             )
         })
         .await;
+        // A hedge always overtakes the upstream just before it (see `Start`).
+        if let (true, Ok((index, _))) = (raced.hedge_won, &raced.result) {
+            self.observer
+                .record_hedge_win(chain[*index - 1].id(), chain[*index].id());
+        }
 
         Finished {
             result: raced
