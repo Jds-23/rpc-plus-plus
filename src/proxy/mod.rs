@@ -13,14 +13,20 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::{Instrument, error, info, info_span, warn};
+use tracing::{Instrument, Span, error, info, info_span, warn};
 use uuid::Uuid;
 
 use crate::{
     decider::Decider,
-    jsonrpc::{JSONRPC_INTERNAL_ERROR, Shape, is_write, shape},
+    jsonrpc::{self, JSONRPC_INTERNAL_ERROR, Shape, is_write, readdress, shape},
     observer::Observer,
-    proxy::{attempt::try_once, hedge::race, reply::Reply},
+    proxy::{
+        attempt::try_once,
+        dedup_key::dedup_key,
+        hedge::race,
+        reply::Reply,
+        singleflight::{Role, SingleFlight},
+    },
     upstream::{Upstream, UpstreamId, call::CallError},
 };
 
@@ -29,6 +35,8 @@ const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 pub struct Pipeline {
     inner: Arc<Inner>,
+    /// `None` when dedup is off.
+    flights: Option<SingleFlight<Reply>>,
 }
 
 /// The pipeline's state, shareable so a request's run can own it (`'static`).
@@ -63,6 +71,7 @@ impl Pipeline {
         #[builder(default = DEFAULT_MAX_ATTEMPT)] max_attempt: u64,
         #[builder(default = DEFAULT_RETRY_AFTER)] retry_after: Duration,
         #[builder(default)] hedging: bool,
+        #[builder(default)] dedup: bool,
     ) -> Result<Self, BuildError> {
         if max_attempt == 0 {
             return Err(BuildError::ZeroMaxAttempt);
@@ -75,6 +84,7 @@ impl Pipeline {
                 retry_after,
                 hedging,
             }),
+            flights: dedup.then(SingleFlight::default),
         })
     }
 }
@@ -83,10 +93,10 @@ impl Pipeline {
     pub async fn proxy(&self, body: Bytes) -> Response {
         let request_id = Uuid::new_v4();
         let span = info_span!("proxy", %request_id);
-        self.proxy_inner(body).instrument(span).await
+        self.proxy_inner(body, request_id).instrument(span).await
     }
 
-    async fn proxy_inner(&self, body: Bytes) -> Response {
+    async fn proxy_inner(&self, body: Bytes, request_id: Uuid) -> Response {
         let received_at = Instant::now();
         info!(event = "request_received", body_bytes = body.len());
         match shape(&body) {
@@ -95,14 +105,63 @@ impl Pipeline {
                 StatusCode::BAD_REQUEST.into_response()
             }
             Shape::Single => {
-                let chain = self.inner.decider.decide(self.inner.max_attempt);
-                run(self.inner.clone(), chain, body, received_at)
-                    .await
-                    .into_response()
+                let reply = match &self.flights {
+                    Some(flights) => self.coalesce(flights, request_id, body, received_at).await,
+                    None => self.start(body, received_at).await,
+                };
+                reply.into_response()
             }
             Shape::Malformed => {
                 warn!(event = "batch_malformed", body_bytes = body.len());
                 StatusCode::BAD_REQUEST.into_response()
+            }
+        }
+    }
+
+    /// This request's run. The chain is decided here, so a follower never
+    /// advances the decider.
+    fn start(
+        &self,
+        body: Bytes,
+        received_at: Instant,
+    ) -> impl Future<Output = Reply> + Send + use<> {
+        let chain = self.inner.decider.decide(self.inner.max_attempt);
+        run(self.inner.clone(), chain, body, received_at)
+    }
+
+    /// Joins the flight for this request's question, or leads it. A write, an
+    /// unknown method or a notification runs on its own.
+    async fn coalesce(
+        &self,
+        flights: &SingleFlight<Reply>,
+        me: Uuid,
+        body: Bytes,
+        received_at: Instant,
+    ) -> Reply {
+        let (Some(key), Some(id)) = (dedup_key(&body), jsonrpc::request_id(&body)) else {
+            return self.start(body, received_at).await;
+        };
+
+        // Instrumented here, so the flight logs under the leader's span
+        // whichever caller ends up polling it.
+        let (flight, role) = flights.join(key, me, || {
+            self.start(body.clone(), received_at)
+                .instrument(Span::current())
+        });
+
+        match role {
+            // The upstream answered the leader's own body: its id is already right.
+            Role::Leader => flight.await,
+            Role::Follower { leader } => {
+                info!(event = "request_coalesced", leader_request_id = %leader);
+                let reply = flight.await;
+                match readdress(&reply.body, &id) {
+                    Some(body) => Reply { body, ..reply },
+                    None => {
+                        warn!(event = "readdress_failed", leader_request_id = %leader);
+                        self.start(body, received_at).await
+                    }
+                }
             }
         }
     }

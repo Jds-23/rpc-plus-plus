@@ -7,6 +7,7 @@ use std::{
 };
 
 use futures_util::future::{BoxFuture, FutureExt, Shared, WeakShared};
+use uuid::Uuid;
 
 use crate::proxy::dedup_key::DedupKey;
 
@@ -16,17 +17,24 @@ pub type Call<T> = BoxFuture<'static, T>;
 /// Whoever is still polling drives it; the last drop cancels it.
 pub type Flight<T> = Shared<Call<T>>;
 
-/// Weak on purpose: the map alone must never keep a call alive. The `u64` is
-/// which flight the entry is, for `Evict`.
-type Entries<T> = HashMap<DedupKey, (u64, WeakShared<Call<T>>)>;
+type Entries<T> = HashMap<DedupKey, Entry<T>>;
 type Inflight<T> = Arc<Mutex<Entries<T>>>;
+
+struct Entry<T> {
+    /// Which flight this is, for `Evict`.
+    id: u64,
+    /// The request that started it, for the followers' logs.
+    leader: Uuid,
+    /// Weak on purpose: the map alone must never keep a call alive.
+    flight: WeakShared<Call<T>>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     /// Started the flight.
     Leader,
-    /// Joined a flight already in the air.
-    Follower,
+    /// Joined a flight already in the air, started by `leader`.
+    Follower { leader: Uuid },
 }
 
 pub struct SingleFlight<T> {
@@ -44,17 +52,24 @@ impl<T> Default for SingleFlight<T> {
 }
 
 impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
-    /// Joins the live flight for `key`, or starts `make()` as a new one.
-    /// `make` runs only for the leader.
+    /// Joins the live flight for `key`, or starts `make()` as a new one led by
+    /// `me`. `make` runs only for the leader.
     ///
     /// Not `async`: the lock can never be held across an `.await`.
-    pub fn join<F>(&self, key: DedupKey, make: impl FnOnce() -> F) -> (Flight<T>, Role)
+    pub fn join<F>(&self, key: DedupKey, me: Uuid, make: impl FnOnce() -> F) -> (Flight<T>, Role)
     where
         F: Future<Output = T> + Send + 'static,
     {
         let mut inflight = lock(&self.inflight);
-        if let Some(flight) = inflight.get(&key).and_then(|(_, weak)| weak.upgrade()) {
-            return (flight, Role::Follower);
+        if let Some(entry) = inflight.get(&key)
+            && let Some(flight) = entry.flight.upgrade()
+        {
+            return (
+                flight,
+                Role::Follower {
+                    leader: entry.leader,
+                },
+            );
         }
 
         // None, or a dead entry whose `Evict` has not run yet: start over it.
@@ -74,7 +89,14 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
         let weak = flight
             .downgrade()
             .expect("a flight that was never polled has not completed");
-        inflight.insert(key, (id, weak));
+        inflight.insert(
+            key,
+            Entry {
+                id,
+                leader: me,
+                flight: weak,
+            },
+        );
         (flight, Role::Leader)
     }
 
@@ -99,7 +121,7 @@ impl<T> Drop for Evict<T> {
         let mut inflight = lock(&self.inflight);
         if inflight
             .get(&self.key)
-            .is_some_and(|(id, _)| *id == self.id)
+            .is_some_and(|entry| entry.id == self.id)
         {
             inflight.remove(&self.key);
         }
@@ -164,7 +186,7 @@ mod tests {
     ) -> Vec<JoinHandle<Answer>> {
         (0..n)
             .map(|_| {
-                let (flight, _) = flights.join(key(method), || fake.call(answer));
+                let (flight, _) = flights.join(key(method), Uuid::new_v4(), || fake.call(answer));
                 tokio::spawn(flight)
             })
             .collect()
@@ -205,13 +227,21 @@ mod tests {
     async fn only_the_first_caller_leads() {
         let (flights, fake) = (SingleFlight::<Answer>::default(), Arc::<Fake>::default());
 
-        let (_first, first) = flights.join(key("eth_chainId"), || fake.call(Ok("0x1")));
-        let (_second, second) = flights
-            .join(key("eth_chainId"), || -> BoxFuture<'static, Answer> {
-                panic!("a follower must not build a call")
-            });
+        let leader = Uuid::new_v4();
 
-        assert_eq!((first, second), (Role::Leader, Role::Follower));
+        let (_first, first) = flights.join(key("eth_chainId"), leader, || fake.call(Ok("0x1")));
+        let (_second, second) = flights.join(
+            key("eth_chainId"),
+            Uuid::new_v4(),
+            || -> BoxFuture<'static, Answer> { panic!("a follower must not build a call") },
+        );
+
+        assert_eq!(first, Role::Leader);
+        assert_eq!(
+            second,
+            Role::Follower { leader },
+            "a follower learns whose flight it joined"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -314,7 +344,9 @@ mod tests {
     #[tokio::test]
     async fn a_stale_evict_spares_its_replacement() {
         let (flights, fake) = (SingleFlight::<Answer>::default(), Arc::<Fake>::default());
-        let (_live, _) = flights.join(key("eth_blockNumber"), || fake.call(Ok("0x10")));
+        let (_live, _) = flights.join(key("eth_blockNumber"), Uuid::new_v4(), || {
+            fake.call(Ok("0x10"))
+        });
 
         drop(Evict {
             inflight: flights.inflight.clone(),
@@ -327,7 +359,12 @@ mod tests {
             1,
             "a late drop of an older flight evicts nothing"
         );
-        let (_, role) = flights.join(key("eth_blockNumber"), || fake.call(Ok("0x10")));
-        assert_eq!(role, Role::Follower, "the live flight is still joinable");
+        let (_, role) = flights.join(key("eth_blockNumber"), Uuid::new_v4(), || {
+            fake.call(Ok("0x10"))
+        });
+        assert!(
+            matches!(role, Role::Follower { .. }),
+            "the live flight is still joinable"
+        );
     }
 }
