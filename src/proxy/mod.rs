@@ -1,6 +1,7 @@
 pub mod attempt;
 pub mod dedup_key;
 mod hedge;
+mod reply;
 
 use axum::{
     body::Bytes,
@@ -16,9 +17,9 @@ use uuid::Uuid;
 
 use crate::{
     decider::Decider,
-    jsonrpc::{JSONRPC_INTERNAL_ERROR, Shape, is_write, rpc_error, shape},
+    jsonrpc::{JSONRPC_INTERNAL_ERROR, Shape, is_write, shape},
     observer::Observer,
-    proxy::{attempt::try_once, hedge::race},
+    proxy::{attempt::try_once, hedge::race, reply::Reply},
     upstream::{Upstream, UpstreamId, call::CallError},
 };
 
@@ -35,7 +36,7 @@ pub struct Pipeline {
 
 /// How a request ended, whichever path ran it.
 struct Finished<'c> {
-    result: Result<(Response, &'c UpstreamId), Option<CallError>>,
+    result: Result<(Reply, &'c UpstreamId), Option<CallError>>,
     tried: Vec<&'c UpstreamId>,
     /// `(hedges, hedge_won)`; `None` when hedging is off.
     hedge: Option<(usize, bool)>,
@@ -92,7 +93,7 @@ impl Pipeline {
                     (true, true) => self.send_once(&chain, &body).await,
                     (false, _) => self.walk(&chain, &body).await,
                 };
-                finish(finished, received_at)
+                finish(finished, received_at).into_response()
             }
             Shape::Malformed => {
                 warn!(event = "batch_malformed", body_bytes = body.len());
@@ -127,9 +128,9 @@ impl Pipeline {
             )
             .await
             {
-                Ok(response) => {
+                Ok(reply) => {
                     return Finished {
-                        result: Ok((response, upstream.id())),
+                        result: Ok((reply, upstream.id())),
                         tried,
                         hedge: None,
                     };
@@ -197,14 +198,14 @@ impl Pipeline {
         Finished {
             result: raced
                 .result
-                .map(|(index, response)| (response, chain[index].id())),
+                .map(|(index, reply)| (reply, chain[index].id())),
             tried: chain[..raced.attempts].iter().map(|u| u.id()).collect(),
             hedge: Some((raced.hedges, raced.hedge_won)),
         }
     }
 }
 
-fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
+fn finish(finished: Finished<'_>, received_at: Instant) -> Reply {
     let Finished {
         result,
         tried,
@@ -213,7 +214,7 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
     let (hedges, hedge_won) = hedge.unzip();
 
     match result {
-        Ok((response, upstream)) => {
+        Ok((reply, upstream)) => {
             info!(
                 event = "request_completed",
                 attempts = tried.len(),
@@ -222,7 +223,7 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
                 hedges,
                 hedge_won,
             );
-            response
+            reply
         }
         Err(last_failure) => {
             let error = match &last_failure {
@@ -237,7 +238,7 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
                 duration_ms = elapsed_ms(received_at),
                 error = %error,
             );
-            rpc_error(JSONRPC_INTERNAL_ERROR, &error)
+            Reply::rpc_error(JSONRPC_INTERNAL_ERROR, &error)
         }
     }
 }

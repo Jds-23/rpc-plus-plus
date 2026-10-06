@@ -1,12 +1,7 @@
 use std::{borrow::Cow, sync::LazyLock};
 
-use axum::{
-    Json,
-    body::Bytes,
-    response::{IntoResponse, Response},
-};
+use axum::body::Bytes;
 use memchr::{memchr2, memmem};
-use reqwest::StatusCode;
 
 pub(crate) const JSONRPC_INTERNAL_ERROR: i64 = -32603;
 
@@ -135,26 +130,24 @@ pub(crate) fn is_hedge_safe(method: &str) -> bool {
     )
 }
 
-pub(crate) fn rpc_error(code: i64, msg: &str) -> Response {
+pub(crate) fn rpc_error_body(code: i64, msg: &str) -> Bytes {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "error": { "code": code, "message": msg },
         "id": null,
     });
-    (StatusCode::OK, Json(body)).into_response()
+    Bytes::from(body.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http_body_util::BodyExt;
 
-    #[tokio::test]
-    async fn rpc_error_escapes_the_message() {
+    #[test]
+    fn rpc_error_escapes_the_message() {
         let msg = "upstream said \"nope\"\nand hung up";
-        let response = rpc_error(JSONRPC_INTERNAL_ERROR, msg);
+        let bytes = rpc_error_body(JSONRPC_INTERNAL_ERROR, msg);
 
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(parsed["error"]["message"], msg);
