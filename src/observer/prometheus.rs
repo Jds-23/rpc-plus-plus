@@ -8,7 +8,7 @@ use prometheus::{
 use crate::{
     observer::{
         MetricsObserver,
-        snapshot::{BUCKET_BOUNDS_MICROS, Snapshot},
+        snapshot::{BUCKET_BOUNDS_MICROS, HedgeCount, Snapshot},
     },
     upstream::call::CallError,
 };
@@ -17,6 +17,12 @@ const ATTEMPTS_NAME: &str = "rpc_attempts_total";
 const ATTEMPTS_HELP: &str = "Total upstream call attempts by outcome";
 const ATTEMPTS_DURATION_NAME: &str = "rpc_attempt_duration_seconds";
 const ATTEMPTS_DURATION_HELP: &str = "Rpc attempt duration in seconds";
+const HEDGES_NAME: &str = "rpc_hedges_total";
+const HEDGES_HELP: &str =
+    "Hedge calls started because this upstream passed its hedge_after, by the upstream hedged to";
+const HEDGE_WINS_NAME: &str = "rpc_hedge_wins_total";
+const HEDGE_WINS_HELP: &str =
+    "Hedge calls that overtook this upstream and answered first, by the upstream hedged to";
 const SUCCESS: &str = "success";
 
 const MICROS_PER_SECOND: f64 = 1_000_000.0;
@@ -25,6 +31,8 @@ pub struct Collector {
     observer: Arc<MetricsObserver>,
     attempts_desc: Desc,
     attempts_duration_desc: Desc,
+    hedges_desc: Desc,
+    hedge_wins_desc: Desc,
 }
 
 impl Collector {
@@ -41,10 +49,14 @@ impl Collector {
             vec!["upstream".to_string()],
             HashMap::new(),
         )?;
+        let hedges_desc = pair_desc(HEDGES_NAME, HEDGES_HELP)?;
+        let hedge_wins_desc = pair_desc(HEDGE_WINS_NAME, HEDGE_WINS_HELP)?;
         Ok(Collector {
             observer,
             attempts_desc,
             attempts_duration_desc,
+            hedges_desc,
+            hedge_wins_desc,
         })
     }
 }
@@ -71,6 +83,16 @@ impl PrometheusCollector for Collector {
             .map(|(upstream, snapshot)| histogram_metric(upstream.as_str(), snapshot))
             .collect();
 
+        let hedges = self.observer.hedge_snapshots();
+        let per_pair = |count: fn(&HedgeCount) -> u64| {
+            hedges
+                .iter()
+                .map(|(overtaken, to, hedge)| {
+                    pair_counter_metric(overtaken.as_str(), to.as_str(), count(hedge))
+                })
+                .collect()
+        };
+
         vec![
             family(ATTEMPTS_NAME, ATTEMPTS_HELP, MetricType::COUNTER, metrics),
             family(
@@ -79,11 +101,38 @@ impl PrometheusCollector for Collector {
                 MetricType::HISTOGRAM,
                 durations,
             ),
+            family(
+                HEDGES_NAME,
+                HEDGES_HELP,
+                MetricType::COUNTER,
+                per_pair(|hedge| hedge.started),
+            ),
+            family(
+                HEDGE_WINS_NAME,
+                HEDGE_WINS_HELP,
+                MetricType::COUNTER,
+                per_pair(|hedge| hedge.won),
+            ),
         ]
     }
     fn desc(&self) -> Vec<&Desc> {
-        vec![&self.attempts_desc, &self.attempts_duration_desc]
+        vec![
+            &self.attempts_desc,
+            &self.attempts_duration_desc,
+            &self.hedges_desc,
+            &self.hedge_wins_desc,
+        ]
     }
+}
+
+/// `upstream` is the one overtaken, `to` the one hedged to.
+fn pair_desc(name: &str, help: &str) -> prometheus::Result<Desc> {
+    Desc::new(
+        name.to_string(),
+        help.to_string(),
+        vec!["upstream".to_string(), "to".to_string()],
+        HashMap::new(),
+    )
 }
 
 fn family(name: &str, help: &str, kind: MetricType, metrics: Vec<Metric>) -> MetricFamily {
@@ -149,6 +198,18 @@ fn attempts(snapshot: &Snapshot) -> u64 {
     outcomes(snapshot).into_iter().map(|(_, count)| count).sum()
 }
 
+fn pair_counter_metric(upstream: &str, to: &str, value: u64) -> Metric {
+    Metric {
+        label: vec![label("upstream", upstream), label("to", to)],
+        counter: Counter {
+            value: Some(value as f64),
+            ..Default::default()
+        }
+        .into(),
+        ..Default::default()
+    }
+}
+
 fn counter_metric(upstream: &str, outcome: &str, value: u64) -> Metric {
     Metric {
         label: vec![label("outcome", outcome), label("upstream", upstream)],
@@ -176,7 +237,10 @@ mod tests {
     use crate::{
         observer::{
             MetricsObserver, Observer,
-            prometheus::{ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, Collector, cumulative},
+            prometheus::{
+                ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, Collector, HEDGE_WINS_NAME, HEDGES_NAME,
+                cumulative,
+            },
         },
         upstream::{
             UpstreamId,
@@ -295,8 +359,38 @@ rpc_attempt_duration_seconds_count{upstream="alpha"} 1
         assert!(collector.collect().is_empty());
     }
 
+    /// `upstream` is the slow one, `to` the one that stepped in.
+    const EXPECTED_HEDGES: &str = r#"# HELP rpc_hedges_total Hedge calls started because this upstream passed its hedge_after, by the upstream hedged to
+# TYPE rpc_hedges_total counter
+rpc_hedges_total{upstream="alpha",to="zulu"} 2
+rpc_hedges_total{upstream="zulu",to="alpha"} 0
+"#;
+
+    const EXPECTED_HEDGE_WINS: &str = r#"# HELP rpc_hedge_wins_total Hedge calls that overtook this upstream and answered first, by the upstream hedged to
+# TYPE rpc_hedge_wins_total counter
+rpc_hedge_wins_total{upstream="alpha",to="zulu"} 1
+rpc_hedge_wins_total{upstream="zulu",to="alpha"} 0
+"#;
+
     #[test]
-    fn test_desc_advertises_both_families() {
+    fn hedges_and_wins_are_counted_per_pair() {
+        let zulu = UpstreamId::new("zulu");
+        let alpha = UpstreamId::new("alpha");
+        let observer = Arc::new(MetricsObserver::new(vec![zulu.clone(), alpha.clone()]));
+        let collector = Collector::new(observer.clone()).unwrap();
+
+        observer.record_hedge(&alpha, &zulu);
+        observer.record_hedge(&alpha, &zulu);
+        observer.record_hedge_win(&alpha, &zulu);
+
+        let families = collector.collect();
+
+        assert_eq!(encode(&families, HEDGES_NAME), EXPECTED_HEDGES);
+        assert_eq!(encode(&families, HEDGE_WINS_NAME), EXPECTED_HEDGE_WINS);
+    }
+
+    #[test]
+    fn test_desc_advertises_every_family() {
         let observer = Arc::new(MetricsObserver::new(vec![]));
         let collector = Collector::new(observer.clone()).unwrap();
 
@@ -306,7 +400,15 @@ rpc_attempt_duration_seconds_count{upstream="alpha"} 1
             .map(|desc| desc.fq_name.as_str())
             .collect();
 
-        assert_eq!(names, [ATTEMPTS_NAME, ATTEMPTS_DURATION_NAME]);
+        assert_eq!(
+            names,
+            [
+                ATTEMPTS_NAME,
+                ATTEMPTS_DURATION_NAME,
+                HEDGES_NAME,
+                HEDGE_WINS_NAME
+            ]
+        );
     }
 
     #[test]

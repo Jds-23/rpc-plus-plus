@@ -53,6 +53,28 @@ pub struct Snapshot {
     pub duration_micros_total: u64,
 }
 
+/// Hedges between one ordered pair of upstreams.
+#[derive(Default)]
+pub struct HedgeStats {
+    pub started: AtomicU64,
+    pub won: AtomicU64,
+}
+
+impl HedgeStats {
+    pub fn snapshot(&self) -> HedgeCount {
+        HedgeCount {
+            started: self.started.load(Ordering::Relaxed),
+            won: self.won.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HedgeCount {
+    pub started: u64,
+    pub won: u64,
+}
+
 pub struct Diff {
     success: u64,
     unreachable: u64,

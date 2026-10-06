@@ -6,10 +6,13 @@ use tracing::info;
 use crate::upstream::{Upstream, call::CallError};
 
 /// Which call the racer is starting, and why.
-pub(super) struct Start {
+pub(super) struct Start<'a> {
     pub attempt: u64,
-    /// The timer started it. A call pulled in by a failure is a retry.
-    pub hedge: bool,
+    /// `Some` when the timer started it: the upstream that ran past its
+    /// `hedge_after`, always the one just before it in the chain, since the
+    /// timer only ever waits on the latest start. `None` for the first call and
+    /// for a retry pulled in by a failure.
+    pub overtaken: Option<&'a Upstream>,
 }
 
 /// What a race did, not just what it answered.
@@ -39,14 +42,14 @@ pub(super) async fn race<'a, T, F, Fut>(
     mut call: F,
 ) -> Raced<T>
 where
-    F: FnMut(&'a Upstream, Start) -> Fut,
+    F: FnMut(&'a Upstream, Start<'a>) -> Fut,
     Fut: Future<Output = Result<T, CallError>>,
 {
     let limit = chain.len().min(max_attempt);
     let launch = |call: &mut F, index: usize, hedge: bool| {
         let start = Start {
             attempt: index as u64 + 1,
-            hedge,
+            overtaken: hedge.then(|| chain[index - 1].as_ref()),
         };
         let pending = call(&chain[index], start);
         async move { (index, hedge, pending.await) }

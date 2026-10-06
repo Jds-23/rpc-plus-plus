@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Instant};
 use reqwest::StatusCode;
 use rpc_plus_plus::{
     config::{Settings, UpstreamSettings},
-    observer::MetricsObserver,
+    observer::{MetricsObserver, snapshot::HedgeCount},
     upstream::UpstreamId,
 };
 use serde_json::json;
@@ -136,4 +136,29 @@ async fn a_json_rpc_error_on_a_200_is_not_a_success() {
     assert_eq!(stats.error_status, 0);
     assert_eq!(stats.unreachable, 0);
     assert_eq!(stats.read_failed, 0);
+}
+
+/// Both counters land on the pair: the slow upstream that ran past its
+/// `hedge_after`, and the one the hedge went to. The overtaken call is dropped
+/// and records no outcome of its own.
+#[tokio::test]
+async fn a_hedge_and_its_win_land_on_the_overtaken_pair() {
+    let slow = mock_rpc_server::slow("0xa", std::time::Duration::from_millis(500)).await;
+    let fast = mock_rpc_server::ok("0xb").await;
+    let mut settings = settings(vec![rpc("slow", slow.uri()), rpc("fast", fast.uri())]);
+    settings.application.proxy.hedge.enabled = true;
+    settings.application.proxy.hedge.after_in_millis = 50;
+    let (ids, observer) = observer(&["slow", "fast"]);
+    let addr = spawn_app_with_observer(settings, observer.clone()).await;
+
+    let res = post(&addr).await;
+    assert_eq!(res.status(), 200);
+
+    let slow_to_fast = observer.hedge_count(&ids[0], &ids[1]).unwrap();
+    assert_eq!(slow_to_fast, HedgeCount { started: 1, won: 1 });
+
+    let fast_to_slow = observer.hedge_count(&ids[1], &ids[0]).unwrap();
+    assert_eq!(fast_to_slow, HedgeCount { started: 0, won: 0 });
+
+    assert_eq!(observer.snapshot(&ids[1]).unwrap().success, 1);
 }
