@@ -28,15 +28,14 @@ pub(super) struct Raced<T> {
 /// The first `Ok` wins and everything still in flight is dropped. A retryable
 /// failure starts the next upstream at once; a final one ends the race. When
 /// the latest call has not answered within its `hedge_after`, the next one is
-/// started beside it — only that counts as a hedge. `hedgeable == false` means
-/// exactly one call, whatever happens to it.
+/// started beside it — only that counts as a hedge. Whether a request may be
+/// raced at all is the caller's call; this always races.
 ///
 /// Polled on the caller's task: the calls borrow the chain and never need
 /// `'static`.
 pub(super) async fn race<'a, T, F, Fut>(
     chain: &'a [Arc<Upstream>],
     max_attempt: usize,
-    hedgeable: bool,
     mut call: F,
 ) -> Raced<T>
 where
@@ -64,7 +63,7 @@ where
     }
 
     loop {
-        let more = next < limit && hedgeable;
+        let more = next < limit;
         if inflight.is_empty() && !more {
             return Raced {
                 result: Err(last_failure),
@@ -196,9 +195,8 @@ mod tests {
         chain: &[Arc<Upstream>],
         fakes: &[Fake],
         max_attempt: usize,
-        hedgeable: bool,
     ) -> Raced<&'static str> {
-        race(chain, max_attempt, hedgeable, |upstream, _| {
+        race(chain, max_attempt, |upstream, _| {
             let fake = fakes
                 .iter()
                 .find(|fake| fake.name == upstream.id().as_str());
@@ -220,7 +218,7 @@ mod tests {
     async fn a_fast_first_upstream_never_hedges() {
         let (chain, fakes) = chain(&[(10, Verdict::Succeeds), (10, Verdict::Succeeds)], 50);
 
-        let out = run(&chain, &fakes, 3, true).await;
+        let out = run(&chain, &fakes, 3).await;
 
         assert_eq!(answer(&out), Ok("first"), "the original answered in time");
         assert_eq!(out.hedges, 0, "the hedge timer never fired");
@@ -236,7 +234,7 @@ mod tests {
         let (chain, fakes) = chain(&[(200, Verdict::Succeeds), (20, Verdict::Succeeds)], 50);
         let started = Instant::now();
 
-        let out = run(&chain, &fakes, 3, true).await;
+        let out = run(&chain, &fakes, 3).await;
 
         assert_eq!(answer(&out), Ok("second"), "the hedge answered first");
         assert_eq!(out.hedges, 1, "exactly one extra call was started");
@@ -259,7 +257,7 @@ mod tests {
         let (chain, fakes) = chain(&[(5, Verdict::Fails), (10, Verdict::Succeeds)], 50);
         let started = Instant::now();
 
-        let out = run(&chain, &fakes, 3, true).await;
+        let out = run(&chain, &fakes, 3).await;
 
         assert_eq!(answer(&out), Ok("second"), "the retry answered");
         assert_eq!(
@@ -275,50 +273,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_write_is_sent_exactly_once() {
-        let (chain, fakes) = chain(&[(200, Verdict::Succeeds), (20, Verdict::Succeeds)], 50);
-        let started = Instant::now();
-
-        let out = run(&chain, &fakes, 3, false).await;
-
-        assert_eq!(
-            answer(&out),
-            Ok("first"),
-            "we waited for the only legal call"
-        );
-        assert_eq!(out.hedges, 0, "a write is never hedged");
-        assert_eq!(
-            fakes[1].entered.get(),
-            0,
-            "eth_sendRawTransaction must never reach a second upstream"
-        );
-        assert_eq!(
-            started.elapsed(),
-            Duration::from_millis(200),
-            "the write guard trades tail latency for exactly-once"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_failed_write_is_not_retried() {
-        let (chain, fakes) = chain(&[(5, Verdict::Fails), (5, Verdict::Succeeds)], 50);
-
-        let out = run(&chain, &fakes, 3, false).await;
-
-        assert_eq!(answer(&out), Err("first".to_string()), "its own failure");
-        assert_eq!(out.attempts, 1);
-        assert_eq!(
-            fakes[1].entered.get(),
-            0,
-            "the first send may already have landed"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn every_upstream_failing_returns_the_last_error() {
         let (chain, fakes) = chain(&[(5, Verdict::Fails), (5, Verdict::Fails)], 50);
 
-        let out = run(&chain, &fakes, 3, true).await;
+        let out = run(&chain, &fakes, 3).await;
 
         assert_eq!(
             answer(&out),
@@ -340,7 +298,7 @@ mod tests {
             50,
         );
 
-        let out = run(&chain, &fakes, 2, true).await;
+        let out = run(&chain, &fakes, 2).await;
 
         assert_eq!(
             answer(&out),
@@ -361,7 +319,7 @@ mod tests {
         let (chain, fakes) = chain(&[(5, Verdict::Final), (10, Verdict::Succeeds)], 50);
         let started = Instant::now();
 
-        let out = run(&chain, &fakes, 3, true).await;
+        let out = run(&chain, &fakes, 3).await;
 
         assert_eq!(
             answer(&out),
@@ -374,7 +332,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_empty_chain_starts_nothing() {
-        let out = run(&[], &[], 3, true).await;
+        let out = run(&[], &[], 3).await;
 
         assert!(matches!(out.result, Err(None)));
         assert_eq!(out.attempts, 0);

@@ -86,10 +86,10 @@ impl Pipeline {
             }
             Shape::Single => {
                 let chain = self.decider.decide(self.max_attempt);
-                let finished = if self.hedging {
-                    self.race(&chain, &body).await
-                } else {
-                    self.walk(&chain, &body).await
+                let finished = match (self.hedging, is_write(&body)) {
+                    (true, false) => self.race(&chain, &body).await,
+                    (true, true) => self.send_once(&chain, &body).await,
+                    (false, _) => self.walk(&chain, &body).await,
                 };
                 finish(finished, received_at)
             }
@@ -150,22 +150,39 @@ impl Pipeline {
         }
     }
 
-    /// Staggered race over the chain. A write never gets a second call.
+    /// A write while hedging is on: the head of the chain and nothing else.
+    /// The first send may land even when it reports failure, so a second call
+    /// risks a double send.
+    async fn send_once<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
+        let Some(upstream) = chain.first() else {
+            return Finished {
+                result: Err(None),
+                tried: Vec::new(),
+                hedge: Some((0, false)),
+            };
+        };
+        let result = try_once(self.observer.as_ref(), upstream, body, 1, false).await;
+
+        Finished {
+            result: result
+                .map(|response| (response, upstream.id()))
+                .map_err(Some),
+            tried: vec![upstream.id()],
+            hedge: Some((0, false)),
+        }
+    }
+
+    /// Staggered race over the chain. Reads only; writes go to `send_once`.
     async fn race<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
-        let raced = race(
-            chain,
-            self.max_attempt,
-            !is_write(body),
-            |upstream, start| {
-                try_once(
-                    self.observer.as_ref(),
-                    upstream,
-                    body,
-                    start.attempt,
-                    start.hedge,
-                )
-            },
-        )
+        let raced = race(chain, self.max_attempt, |upstream, start| {
+            try_once(
+                self.observer.as_ref(),
+                upstream,
+                body,
+                start.attempt,
+                start.hedge,
+            )
+        })
         .await;
 
         Finished {

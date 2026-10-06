@@ -90,3 +90,29 @@ pub async fn failing(status: StatusCode) -> MockServer {
 pub async fn rpc_erroring(code: i64, message: &'static str) -> MockServer {
     mock_rpc(move |_| RpcReply::error(code, message)).await
 }
+
+struct Delayed<R> {
+    inner: R,
+    delay: std::time::Duration,
+}
+
+impl<R: Respond> Respond for Delayed<R> {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        self.inner.respond(request).set_delay(self.delay)
+    }
+}
+
+/// Replies with `result`, but only after `delay`.
+pub async fn slow(result: impl Into<Value>, delay: std::time::Duration) -> MockServer {
+    let result = result.into();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(Delayed {
+            inner: RpcResponder(move |_: &Value| result.clone()),
+            delay,
+        })
+        .mount(&server)
+        .await;
+    server
+}

@@ -166,3 +166,80 @@ async fn a_json_rpc_error_moves_to_the_next_upstream() {
     assert_eq!(limited.received_requests().await.unwrap().len(), 1);
     assert_eq!(live.received_requests().await.unwrap().len(), 1);
 }
+
+const SEND_RAW: &str = "eth_sendRawTransaction";
+
+/// The first upstream is slower than `hedge.after_in_millis`; a read would be
+/// hedged to the second, a write must wait it out.
+#[tokio::test]
+async fn a_slow_write_is_not_hedged() {
+    let slow = mock_rpc_server::slow("0xa", std::time::Duration::from_millis(500)).await;
+    let fast = mock_rpc_server::ok("0xb").await;
+    let mut settings = test_settings(vec![rpc("one", slow.uri()), rpc("two", fast.uri())]);
+    settings.application.proxy.hedge.enabled = true;
+    settings.application.proxy.hedge.after_in_millis = 50;
+    let addr = spawn_app(settings).await;
+
+    let res = reqwest::Client::new()
+        .post(format!("{addr}/rpc"))
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":SEND_RAW,"params":["0x00"]}))
+        .send()
+        .await
+        .unwrap();
+
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["result"], "0xa", "we waited for the only legal call");
+    assert_eq!(slow.received_requests().await.unwrap().len(), 1);
+    assert_eq!(
+        fast.received_requests().await.unwrap().len(),
+        0,
+        "a write must never reach a second upstream"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_write_is_not_retried_while_hedging() {
+    let down = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
+    let live = mock_rpc_server::ok("0xb").await;
+    let mut settings = test_settings(vec![rpc("one", down.uri()), rpc("two", live.uri())]);
+    settings.application.proxy.hedge.enabled = true;
+    settings.application.proxy.retry_after_in_secs = 0;
+    let addr = spawn_app(settings).await;
+
+    let res = reqwest::Client::new()
+        .post(format!("{addr}/rpc"))
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":SEND_RAW,"params":["0x00"]}))
+        .send()
+        .await
+        .unwrap();
+
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["code"], -32603, "its own failure");
+    assert_eq!(down.received_requests().await.unwrap().len(), 1);
+    assert_eq!(
+        live.received_requests().await.unwrap().len(),
+        0,
+        "the first send may already have landed"
+    );
+}
+
+/// The control for the two above: the same slow chain does hedge a read.
+#[tokio::test]
+async fn a_slow_read_is_hedged() {
+    let slow = mock_rpc_server::slow("0xa", std::time::Duration::from_millis(500)).await;
+    let fast = mock_rpc_server::ok("0xb").await;
+    let mut settings = test_settings(vec![rpc("one", slow.uri()), rpc("two", fast.uri())]);
+    settings.application.proxy.hedge.enabled = true;
+    settings.application.proxy.hedge.after_in_millis = 50;
+    let addr = spawn_app(settings).await;
+
+    let res = reqwest::Client::new()
+        .post(format!("{addr}/rpc"))
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}))
+        .send()
+        .await
+        .unwrap();
+
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["result"], "0xb", "the hedge answered first");
+}
