@@ -1,4 +1,5 @@
 pub mod attempt;
+mod hedge;
 
 use axum::{
     body::Bytes,
@@ -14,10 +15,10 @@ use uuid::Uuid;
 
 use crate::{
     decider::Decider,
-    jsonrpc::{JSONRPC_INTERNAL_ERROR, Shape, rpc_error, shape},
+    jsonrpc::{JSONRPC_INTERNAL_ERROR, Shape, is_write, rpc_error, shape},
     observer::Observer,
-    proxy::attempt::try_once,
-    upstream::{UpstreamId, call::CallError},
+    proxy::{attempt::try_once, hedge::race},
+    upstream::{Upstream, UpstreamId, call::CallError},
 };
 
 const DEFAULT_MAX_ATTEMPT: u64 = 3;
@@ -28,6 +29,15 @@ pub struct Pipeline {
     decider: Arc<dyn Decider>,
     max_attempt: usize,
     retry_after: Duration,
+    hedging: bool,
+}
+
+/// How a request ended, whichever path ran it.
+struct Finished<'c> {
+    result: Result<(Response, &'c UpstreamId), Option<CallError>>,
+    tried: Vec<&'c UpstreamId>,
+    /// `(hedges, hedge_won)`; `None` when hedging is off.
+    hedge: Option<(usize, bool)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +54,7 @@ impl Pipeline {
         observer: Arc<dyn Observer>,
         #[builder(default = DEFAULT_MAX_ATTEMPT)] max_attempt: u64,
         #[builder(default = DEFAULT_RETRY_AFTER)] retry_after: Duration,
+        #[builder(default)] hedging: bool,
     ) -> Result<Self, BuildError> {
         if max_attempt == 0 {
             return Err(BuildError::ZeroMaxAttempt);
@@ -53,6 +64,7 @@ impl Pipeline {
             observer,
             max_attempt: max_attempt as usize,
             retry_after,
+            hedging,
         })
     }
 }
@@ -74,59 +86,149 @@ impl Pipeline {
             }
             Shape::Single => {
                 let chain = self.decider.decide(self.max_attempt);
-                let mut tried: Vec<&UpstreamId> = Vec::with_capacity(chain.len());
-
-                let mut last_failure: Option<CallError> = None;
-
-                for upstream in &chain {
-                    if tried.len() >= self.max_attempt {
-                        break;
-                    }
-                    if !tried.is_empty() {
-                        tokio::time::sleep(self.retry_after).await;
-                    }
-                    tried.push(upstream.id());
-
-                    match try_once(self.observer.as_ref(), upstream, &body, tried.len() as u64)
-                        .await
-                    {
-                        Ok(response) => {
-                            info!(
-                                event = "request_completed",
-                                attempts = tried.len(),
-                                upstream = %upstream.id(),
-                                duration_ms = elapsed_ms(received_at),
-                            );
-                            return response;
-                        }
-                        Err(failure) => {
-                            let retryable = failure.is_retryable();
-                            last_failure = Some(failure);
-                            if !retryable {
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                let error = match &last_failure {
-                    Some(failure) => failure.to_string(),
-                    None => "no upstream available".to_string(),
+                let finished = match (self.hedging, is_write(&body)) {
+                    (true, false) => self.race(&chain, &body).await,
+                    (true, true) => self.send_once(&chain, &body).await,
+                    (false, _) => self.walk(&chain, &body).await,
                 };
-
-                error!(
-                    event = "retries_exhausted",
-                    attempts = tried.len(),
-                    tried = ?tried,
-                    duration_ms = elapsed_ms(received_at),
-                    error = %error,
-                );
-                rpc_error(JSONRPC_INTERNAL_ERROR, &error)
+                finish(finished, received_at)
             }
             Shape::Malformed => {
                 warn!(event = "batch_malformed", body_bytes = body.len());
                 StatusCode::BAD_REQUEST.into_response()
             }
+        }
+    }
+}
+
+impl Pipeline {
+    /// One upstream at a time, `retry_after` between them.
+    async fn walk<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
+        let mut tried: Vec<&UpstreamId> = Vec::with_capacity(chain.len());
+
+        let mut last_failure: Option<CallError> = None;
+
+        for upstream in chain {
+            if tried.len() >= self.max_attempt {
+                break;
+            }
+            if !tried.is_empty() {
+                tokio::time::sleep(self.retry_after).await;
+            }
+            tried.push(upstream.id());
+
+            match try_once(
+                self.observer.as_ref(),
+                upstream,
+                body,
+                tried.len() as u64,
+                false,
+            )
+            .await
+            {
+                Ok(response) => {
+                    return Finished {
+                        result: Ok((response, upstream.id())),
+                        tried,
+                        hedge: None,
+                    };
+                }
+                Err(failure) => {
+                    let retryable = failure.is_retryable();
+                    last_failure = Some(failure);
+                    if !retryable {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Finished {
+            result: Err(last_failure),
+            tried,
+            hedge: None,
+        }
+    }
+
+    /// A write while hedging is on: the head of the chain and nothing else.
+    /// The first send may land even when it reports failure, so a second call
+    /// risks a double send.
+    async fn send_once<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
+        let Some(upstream) = chain.first() else {
+            return Finished {
+                result: Err(None),
+                tried: Vec::new(),
+                hedge: Some((0, false)),
+            };
+        };
+        let result = try_once(self.observer.as_ref(), upstream, body, 1, false).await;
+
+        Finished {
+            result: result
+                .map(|response| (response, upstream.id()))
+                .map_err(Some),
+            tried: vec![upstream.id()],
+            hedge: Some((0, false)),
+        }
+    }
+
+    /// Staggered race over the chain. Reads only; writes go to `send_once`.
+    async fn race<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
+        let raced = race(chain, self.max_attempt, |upstream, start| {
+            try_once(
+                self.observer.as_ref(),
+                upstream,
+                body,
+                start.attempt,
+                start.hedge,
+            )
+        })
+        .await;
+
+        Finished {
+            result: raced
+                .result
+                .map(|(index, response)| (response, chain[index].id())),
+            tried: chain[..raced.attempts].iter().map(|u| u.id()).collect(),
+            hedge: Some((raced.hedges, raced.hedge_won)),
+        }
+    }
+}
+
+fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
+    let Finished {
+        result,
+        tried,
+        hedge,
+    } = finished;
+    let (hedges, hedge_won) = hedge.unzip();
+
+    match result {
+        Ok((response, upstream)) => {
+            info!(
+                event = "request_completed",
+                attempts = tried.len(),
+                upstream = %upstream,
+                duration_ms = elapsed_ms(received_at),
+                hedges,
+                hedge_won,
+            );
+            response
+        }
+        Err(last_failure) => {
+            let error = match &last_failure {
+                Some(failure) => failure.to_string(),
+                None => "no upstream available".to_string(),
+            };
+
+            error!(
+                event = "retries_exhausted",
+                attempts = tried.len(),
+                tried = ?tried,
+                duration_ms = elapsed_ms(received_at),
+                error = %error,
+            );
+            rpc_error(JSONRPC_INTERNAL_ERROR, &error)
         }
     }
 }

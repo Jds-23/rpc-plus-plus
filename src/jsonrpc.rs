@@ -84,7 +84,6 @@ struct MethodEnvelope<'a> {
 }
 
 // No byte prefilter: a skip can't prove `method` exists, and misses `\u` escapes.
-#[cfg_attr(not(test), expect(dead_code, reason = "called by the hedge racer"))]
 pub(crate) fn is_write(body: &Bytes) -> bool {
     match serde_json::from_slice::<MethodEnvelope>(body) {
         Ok(envelope) => !is_hedge_safe(&envelope.method),
