@@ -94,7 +94,7 @@ pub(crate) fn is_write(body: &Bytes) -> bool {
 
 // An allowlist, so an unknown write fails closed: a missing read only loses a hedge.
 // Filters are out on purpose — each node keeps its own, and polling one consumes it.
-fn is_hedge_safe(method: &str) -> bool {
+pub(crate) fn is_hedge_safe(method: &str) -> bool {
     matches!(
         method,
         "eth_blockNumber"

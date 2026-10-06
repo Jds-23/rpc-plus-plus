@@ -1,4 +1,5 @@
 pub mod attempt;
+pub mod dedup_key;
 mod hedge;
 
 use axum::{
