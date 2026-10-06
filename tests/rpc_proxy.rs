@@ -276,6 +276,22 @@ fn block_number(id: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":"eth_blockNumber","params":[]})
 }
 
+/// `rpc_requests_coalesced_total` as `/metrics` reports it.
+async fn coalesced(addr: &str) -> u64 {
+    let metrics = reqwest::get(format!("{addr}/metrics"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    metrics
+        .lines()
+        .find_map(|line| line.strip_prefix("rpc_requests_coalesced_total "))
+        .expect("the family is registered even with dedup off")
+        .parse()
+        .unwrap()
+}
+
 async fn hits(upstream: &wiremock::MockServer) -> usize {
     upstream.received_requests().await.unwrap().len()
 }
@@ -293,6 +309,7 @@ async fn concurrent_identical_reads_share_one_upstream_call() {
         1,
         "11 identical reads, one upstream call"
     );
+    assert_eq!(coalesced(&addr).await, 10, "everyone but the leader");
     for (answer, id) in answers.iter().zip(&ids) {
         assert_eq!(&answer["id"], id, "every caller gets its own id back");
         assert_eq!(answer["result"], "0x10");
@@ -370,4 +387,5 @@ async fn dedup_off_sends_every_request() {
         5,
         "off by default, and off means today's path"
     );
+    assert_eq!(coalesced(&addr).await, 0);
 }

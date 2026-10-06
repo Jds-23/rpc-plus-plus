@@ -10,7 +10,10 @@ use crate::{
     config::{ApplicationSettings, DeciderKind, Settings},
     decider::{Decider, prefer_least_errors::PreferLeastErrors, round_robin::RoundRobin},
     http,
-    observer::{MetricsObserver, prometheus::Collector},
+    observer::{
+        MetricsObserver,
+        prometheus::{Collector, coalesced_counter},
+    },
     proxy::Pipeline,
     upstream::{Upstream, build_all, build_http_client},
 };
@@ -39,6 +42,11 @@ impl Application {
             .register(Box::new(collector))
             .context("failed to register the metrics collector")?;
 
+        let coalesced = coalesced_counter().context("failed to build the coalesced counter")?;
+        registry
+            .register(Box::new(coalesced.clone()))
+            .context("failed to register the coalesced counter")?;
+
         let upstream_count = decider.upstream_len();
 
         let pipeline = Pipeline::builder()
@@ -48,6 +56,7 @@ impl Application {
             .retry_after(Duration::from_secs(settings.proxy.retry_after_in_secs))
             .hedging(settings.proxy.hedge.enabled)
             .dedup(settings.proxy.dedup.enabled)
+            .coalesced(coalesced)
             .build()?;
 
         let router = http::build_router(Arc::new(pipeline), Arc::new(registry));

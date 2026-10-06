@@ -8,6 +8,7 @@ use axum::{
     body::Bytes,
     response::{IntoResponse, Response},
 };
+use prometheus::IntCounter;
 use reqwest::StatusCode;
 use std::{
     sync::Arc,
@@ -37,6 +38,7 @@ pub struct Pipeline {
     inner: Arc<Inner>,
     /// `None` when dedup is off.
     flights: Option<SingleFlight<Reply>>,
+    coalesced: IntCounter,
 }
 
 /// The pipeline's state, shareable so a request's run can own it (`'static`).
@@ -72,6 +74,7 @@ impl Pipeline {
         #[builder(default = DEFAULT_RETRY_AFTER)] retry_after: Duration,
         #[builder(default)] hedging: bool,
         #[builder(default)] dedup: bool,
+        coalesced: IntCounter,
     ) -> Result<Self, BuildError> {
         if max_attempt == 0 {
             return Err(BuildError::ZeroMaxAttempt);
@@ -85,6 +88,7 @@ impl Pipeline {
                 hedging,
             }),
             flights: dedup.then(SingleFlight::default),
+            coalesced,
         })
     }
 }
@@ -156,7 +160,10 @@ impl Pipeline {
                 info!(event = "request_coalesced", leader_request_id = %leader);
                 let reply = flight.await;
                 match readdress(&reply.body, &id) {
-                    Some(body) => Reply { body, ..reply },
+                    Some(body) => {
+                        self.coalesced.inc();
+                        Reply { body, ..reply }
+                    }
                     None => {
                         warn!(event = "readdress_failed", leader_request_id = %leader);
                         self.start(body, received_at).await
