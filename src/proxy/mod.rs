@@ -1,23 +1,33 @@
 pub mod attempt;
+pub mod dedup_key;
 mod hedge;
+mod reply;
+pub mod singleflight;
 
 use axum::{
     body::Bytes,
     response::{IntoResponse, Response},
 };
+use prometheus::IntCounter;
 use reqwest::StatusCode;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::{Instrument, error, info, info_span, warn};
+use tracing::{Instrument, Span, error, info, info_span, warn};
 use uuid::Uuid;
 
 use crate::{
     decider::Decider,
-    jsonrpc::{JSONRPC_INTERNAL_ERROR, Shape, is_write, rpc_error, shape},
+    jsonrpc::{self, JSONRPC_INTERNAL_ERROR, Shape, is_write, readdress, shape},
     observer::Observer,
-    proxy::{attempt::try_once, hedge::race},
+    proxy::{
+        attempt::try_once,
+        dedup_key::dedup_key,
+        hedge::race,
+        reply::Reply,
+        singleflight::{Role, SingleFlight},
+    },
     upstream::{Upstream, UpstreamId, call::CallError},
 };
 
@@ -25,6 +35,14 @@ const DEFAULT_MAX_ATTEMPT: u64 = 3;
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 pub struct Pipeline {
+    inner: Arc<Inner>,
+    /// `None` when dedup is off.
+    flights: Option<SingleFlight<Reply>>,
+    coalesced: IntCounter,
+}
+
+/// The pipeline's state, shareable so a request's run can own it (`'static`).
+struct Inner {
     observer: Arc<dyn Observer>,
     decider: Arc<dyn Decider>,
     max_attempt: usize,
@@ -34,7 +52,7 @@ pub struct Pipeline {
 
 /// How a request ended, whichever path ran it.
 struct Finished<'c> {
-    result: Result<(Response, &'c UpstreamId), Option<CallError>>,
+    result: Result<(Reply, &'c UpstreamId), Option<CallError>>,
     tried: Vec<&'c UpstreamId>,
     /// `(hedges, hedge_won)`; `None` when hedging is off.
     hedge: Option<(usize, bool)>,
@@ -55,16 +73,22 @@ impl Pipeline {
         #[builder(default = DEFAULT_MAX_ATTEMPT)] max_attempt: u64,
         #[builder(default = DEFAULT_RETRY_AFTER)] retry_after: Duration,
         #[builder(default)] hedging: bool,
+        #[builder(default)] dedup: bool,
+        coalesced: IntCounter,
     ) -> Result<Self, BuildError> {
         if max_attempt == 0 {
             return Err(BuildError::ZeroMaxAttempt);
         }
         Ok(Self {
-            decider,
-            observer,
-            max_attempt: max_attempt as usize,
-            retry_after,
-            hedging,
+            inner: Arc::new(Inner {
+                decider,
+                observer,
+                max_attempt: max_attempt as usize,
+                retry_after,
+                hedging,
+            }),
+            flights: dedup.then(SingleFlight::default),
+            coalesced,
         })
     }
 }
@@ -73,10 +97,10 @@ impl Pipeline {
     pub async fn proxy(&self, body: Bytes) -> Response {
         let request_id = Uuid::new_v4();
         let span = info_span!("proxy", %request_id);
-        self.proxy_inner(body).instrument(span).await
+        self.proxy_inner(body, request_id).instrument(span).await
     }
 
-    async fn proxy_inner(&self, body: Bytes) -> Response {
+    async fn proxy_inner(&self, body: Bytes, request_id: Uuid) -> Response {
         let received_at = Instant::now();
         info!(event = "request_received", body_bytes = body.len());
         match shape(&body) {
@@ -85,13 +109,11 @@ impl Pipeline {
                 StatusCode::BAD_REQUEST.into_response()
             }
             Shape::Single => {
-                let chain = self.decider.decide(self.max_attempt);
-                let finished = match (self.hedging, is_write(&body)) {
-                    (true, false) => self.race(&chain, &body).await,
-                    (true, true) => self.send_once(&chain, &body).await,
-                    (false, _) => self.walk(&chain, &body).await,
+                let reply = match &self.flights {
+                    Some(flights) => self.coalesce(flights, request_id, body, received_at).await,
+                    None => self.start(body, received_at).await,
                 };
-                finish(finished, received_at)
+                reply.into_response()
             }
             Shape::Malformed => {
                 warn!(event = "batch_malformed", body_bytes = body.len());
@@ -99,9 +121,76 @@ impl Pipeline {
             }
         }
     }
+
+    /// This request's run. The chain is decided here, so a follower never
+    /// advances the decider.
+    fn start(
+        &self,
+        body: Bytes,
+        received_at: Instant,
+    ) -> impl Future<Output = Reply> + Send + use<> {
+        let chain = self.inner.decider.decide(self.inner.max_attempt);
+        run(self.inner.clone(), chain, body, received_at)
+    }
+
+    /// Joins the flight for this request's question, or leads it. A write, an
+    /// unknown method or a notification runs on its own.
+    async fn coalesce(
+        &self,
+        flights: &SingleFlight<Reply>,
+        me: Uuid,
+        body: Bytes,
+        received_at: Instant,
+    ) -> Reply {
+        let (Some(key), Some(id)) = (dedup_key(&body), jsonrpc::request_id(&body)) else {
+            return self.start(body, received_at).await;
+        };
+
+        // Instrumented here, so the flight logs under the leader's span
+        // whichever caller ends up polling it.
+        let (flight, role) = flights.join(key, me, || {
+            self.start(body.clone(), received_at)
+                .instrument(Span::current())
+        });
+
+        match role {
+            // The upstream answered the leader's own body: its id is already right.
+            Role::Leader => flight.await,
+            Role::Follower { leader } => {
+                info!(event = "request_coalesced", leader_request_id = %leader);
+                let reply = flight.await;
+                match readdress(&reply.body, &id) {
+                    Some(body) => {
+                        self.coalesced.inc();
+                        Reply { body, ..reply }
+                    }
+                    None => {
+                        warn!(event = "readdress_failed", leader_request_id = %leader);
+                        self.start(body, received_at).await
+                    }
+                }
+            }
+        }
+    }
 }
 
-impl Pipeline {
+/// One request, start to finish. Owns everything it touches, so it can run as
+/// a flight that outlives the caller who started it.
+async fn run(
+    inner: Arc<Inner>,
+    chain: Vec<Arc<Upstream>>,
+    body: Bytes,
+    received_at: Instant,
+) -> Reply {
+    let finished = match (inner.hedging, is_write(&body)) {
+        (true, false) => inner.race(&chain, &body).await,
+        (true, true) => inner.send_once(&chain, &body).await,
+        (false, _) => inner.walk(&chain, &body).await,
+    };
+    finish(finished, received_at)
+}
+
+impl Inner {
     /// One upstream at a time, `retry_after` between them.
     async fn walk<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
         let mut tried: Vec<&UpstreamId> = Vec::with_capacity(chain.len());
@@ -126,9 +215,9 @@ impl Pipeline {
             )
             .await
             {
-                Ok(response) => {
+                Ok(reply) => {
                     return Finished {
-                        result: Ok((response, upstream.id())),
+                        result: Ok((reply, upstream.id())),
                         tried,
                         hedge: None,
                     };
@@ -164,9 +253,7 @@ impl Pipeline {
         let result = try_once(self.observer.as_ref(), upstream, body, 1, false).await;
 
         Finished {
-            result: result
-                .map(|response| (response, upstream.id()))
-                .map_err(Some),
+            result: result.map(|reply| (reply, upstream.id())).map_err(Some),
             tried: vec![upstream.id()],
             hedge: Some((0, false)),
         }
@@ -196,14 +283,14 @@ impl Pipeline {
         Finished {
             result: raced
                 .result
-                .map(|(index, response)| (response, chain[index].id())),
+                .map(|(index, reply)| (reply, chain[index].id())),
             tried: chain[..raced.attempts].iter().map(|u| u.id()).collect(),
             hedge: Some((raced.hedges, raced.hedge_won)),
         }
     }
 }
 
-fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
+fn finish(finished: Finished<'_>, received_at: Instant) -> Reply {
     let Finished {
         result,
         tried,
@@ -212,7 +299,7 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
     let (hedges, hedge_won) = hedge.unzip();
 
     match result {
-        Ok((response, upstream)) => {
+        Ok((reply, upstream)) => {
             info!(
                 event = "request_completed",
                 attempts = tried.len(),
@@ -221,7 +308,7 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
                 hedges,
                 hedge_won,
             );
-            response
+            reply
         }
         Err(last_failure) => {
             let error = match &last_failure {
@@ -236,11 +323,24 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
                 duration_ms = elapsed_ms(received_at),
                 error = %error,
             );
-            rpc_error(JSONRPC_INTERNAL_ERROR, &error)
+            Reply::rpc_error(JSONRPC_INTERNAL_ERROR, &error)
         }
     }
 }
 
 fn elapsed_ms(since: Instant) -> u64 {
     since.elapsed().as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn static_send<F: Future + Send + 'static>(_: F) {}
+
+    // Never called: it compiles only while `run` is `Send + 'static`.
+    #[allow(dead_code)]
+    fn run_can_be_a_flight(inner: Arc<Inner>) {
+        static_send(run(inner, Vec::new(), Bytes::new(), Instant::now()));
+    }
 }

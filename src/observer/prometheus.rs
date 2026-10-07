@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use prometheus::{
+    IntCounter,
     core::{Collector as PrometheusCollector, Desc},
     proto::{Bucket, Counter, Histogram, LabelPair, Metric, MetricFamily, MetricType},
 };
@@ -24,8 +25,15 @@ const HEDGE_WINS_NAME: &str = "rpc_hedge_wins_total";
 const HEDGE_WINS_HELP: &str =
     "Hedge calls that overtook this upstream and answered first, by the upstream hedged to";
 const SUCCESS: &str = "success";
+const COALESCED_NAME: &str = "rpc_requests_coalesced_total";
+const COALESCED_HELP: &str = "Requests answered by another request's flight";
 
 const MICROS_PER_SECOND: f64 = 1_000_000.0;
+
+/// Pipeline-level, not per upstream: a coalesced request made no call.
+pub fn coalesced_counter() -> prometheus::Result<IntCounter> {
+    IntCounter::new(COALESCED_NAME, COALESCED_HELP)
+}
 
 pub struct Collector {
     observer: Arc<MetricsObserver>,

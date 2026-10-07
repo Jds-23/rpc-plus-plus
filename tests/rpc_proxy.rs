@@ -1,7 +1,8 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use futures_util::future::join_all;
 use reqwest::StatusCode;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::common::{mock_rpc_server, rpc, spawn_app, test_settings};
 
@@ -242,4 +243,149 @@ async fn a_slow_read_is_hedged() {
 
     let body: serde_json::Value = res.json().await.unwrap();
     assert_eq!(body["result"], "0xb", "the hedge answered first");
+}
+
+const UPSTREAM_DELAY: Duration = Duration::from_millis(300);
+
+/// One slow upstream behind a proxy with dedup set to `dedup`.
+async fn slow_proxy(dedup: bool) -> (String, wiremock::MockServer) {
+    let upstream = mock_rpc_server::slow("0x10", UPSTREAM_DELAY).await;
+    let mut settings = test_settings(vec![rpc("one", upstream.uri())]);
+    settings.application.proxy.dedup.enabled = dedup;
+    (spawn_app(settings).await, upstream)
+}
+
+async fn post(client: &reqwest::Client, addr: &str, request: Value) -> Value {
+    let res = client
+        .post(format!("{addr}/rpc"))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    res.json().await.unwrap()
+}
+
+/// `requests` sent together, so they overlap in flight.
+async fn all_at_once(addr: &str, requests: Vec<Value>) -> Vec<Value> {
+    let client = reqwest::Client::new();
+    join_all(requests.into_iter().map(|r| post(&client, addr, r))).await
+}
+
+fn block_number(id: Value) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"method":"eth_blockNumber","params":[]})
+}
+
+/// `rpc_requests_coalesced_total` as `/metrics` reports it.
+async fn coalesced(addr: &str) -> u64 {
+    let metrics = reqwest::get(format!("{addr}/metrics"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    metrics
+        .lines()
+        .find_map(|line| line.strip_prefix("rpc_requests_coalesced_total "))
+        .expect("the family is registered even with dedup off")
+        .parse()
+        .unwrap()
+}
+
+async fn hits(upstream: &wiremock::MockServer) -> usize {
+    upstream.received_requests().await.unwrap().len()
+}
+
+#[tokio::test]
+async fn concurrent_identical_reads_share_one_upstream_call() {
+    let (addr, upstream) = slow_proxy(true).await;
+    let mut ids: Vec<Value> = (0..10).map(Value::from).collect();
+    ids.push(json!("abc"));
+
+    let answers = all_at_once(&addr, ids.iter().cloned().map(block_number).collect()).await;
+
+    assert_eq!(
+        hits(&upstream).await,
+        1,
+        "11 identical reads, one upstream call"
+    );
+    assert_eq!(coalesced(&addr).await, 10, "everyone but the leader");
+    for (answer, id) in answers.iter().zip(&ids) {
+        assert_eq!(&answer["id"], id, "every caller gets its own id back");
+        assert_eq!(answer["result"], "0x10");
+    }
+}
+
+#[tokio::test]
+async fn identical_writes_are_never_coalesced() {
+    let (addr, upstream) = slow_proxy(true).await;
+    let send = |id: u64| json!({"jsonrpc":"2.0","id":id,"method":"eth_sendRawTransaction","params":["0xf86c"]});
+
+    all_at_once(&addr, vec![send(1), send(2)]).await;
+
+    assert_eq!(hits(&upstream).await, 2, "two sends are two intents");
+}
+
+#[tokio::test]
+async fn different_params_are_different_questions() {
+    let (addr, upstream) = slow_proxy(true).await;
+    let balance = |who: &str| json!({"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":[who, "latest"]});
+
+    all_at_once(&addr, vec![balance("0xaa"), balance("0xbb")]).await;
+
+    assert_eq!(hits(&upstream).await, 2);
+}
+
+#[tokio::test]
+async fn the_leader_hanging_up_strands_no_follower() {
+    let (addr, upstream) = slow_proxy(true).await;
+    let client = reqwest::Client::new();
+
+    let leader = tokio::spawn({
+        let (client, addr) = (client.clone(), addr.clone());
+        async move { post(&client, &addr, block_number(json!(0))).await }
+    });
+    tokio::time::sleep(UPSTREAM_DELAY / 6).await;
+    let followers: Vec<_> = (1..4)
+        .map(|id| {
+            let (client, addr) = (client.clone(), addr.clone());
+            tokio::spawn(async move { post(&client, &addr, block_number(json!(id))).await })
+        })
+        .collect();
+    tokio::time::sleep(UPSTREAM_DELAY / 6).await;
+    leader.abort();
+
+    for (id, follower) in (1..4).zip(followers) {
+        let answer = follower.await.expect("follower panicked");
+        assert_eq!(
+            answer["id"], id,
+            "a follower is answered after the leader left"
+        );
+        assert_eq!(answer["result"], "0x10");
+    }
+    assert_eq!(hits(&upstream).await, 1, "and it is still the one call");
+}
+
+#[tokio::test]
+async fn a_finished_flight_is_not_a_cache() {
+    let (addr, upstream) = slow_proxy(true).await;
+
+    all_at_once(&addr, vec![block_number(json!(1))]).await;
+    all_at_once(&addr, vec![block_number(json!(2))]).await;
+
+    assert_eq!(hits(&upstream).await, 2, "a later request asks again");
+}
+
+#[tokio::test]
+async fn dedup_off_sends_every_request() {
+    let (addr, upstream) = slow_proxy(false).await;
+
+    all_at_once(&addr, (0..5).map(|id| block_number(json!(id))).collect()).await;
+
+    assert_eq!(
+        hits(&upstream).await,
+        5,
+        "off by default, and off means today's path"
+    );
+    assert_eq!(coalesced(&addr).await, 0);
 }

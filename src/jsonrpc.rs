@@ -1,12 +1,9 @@
-use std::{borrow::Cow, sync::LazyLock};
+use std::{borrow::Cow, collections::BTreeMap, sync::LazyLock};
 
-use axum::{
-    Json,
-    body::Bytes,
-    response::{IntoResponse, Response},
-};
+use axum::body::Bytes;
 use memchr::{memchr2, memmem};
-use reqwest::StatusCode;
+use serde::{Deserialize, Deserializer};
+use serde_json::value::RawValue;
 
 pub(crate) const JSONRPC_INTERNAL_ERROR: i64 = -32603;
 
@@ -94,7 +91,7 @@ pub(crate) fn is_write(body: &Bytes) -> bool {
 
 // An allowlist, so an unknown write fails closed: a missing read only loses a hedge.
 // Filters are out on purpose — each node keeps its own, and polling one consumes it.
-fn is_hedge_safe(method: &str) -> bool {
+pub(crate) fn is_hedge_safe(method: &str) -> bool {
     matches!(
         method,
         "eth_blockNumber"
@@ -135,26 +132,48 @@ fn is_hedge_safe(method: &str) -> bool {
     )
 }
 
-pub(crate) fn rpc_error(code: i64, msg: &str) -> Response {
+pub(crate) fn rpc_error_body(code: i64, msg: &str) -> Bytes {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "error": { "code": code, "message": msg },
         "id": null,
     });
-    (StatusCode::OK, Json(body)).into_response()
+    Bytes::from(body.to_string())
+}
+
+#[derive(serde::Deserialize)]
+struct IdEnvelope<'a> {
+    #[serde(borrow, default, deserialize_with = "present")]
+    id: Option<&'a RawValue>,
+}
+
+fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<&'de RawValue>, D::Error> {
+    <&RawValue>::deserialize(d).map(Some)
+}
+
+pub fn request_id(body: &Bytes) -> Option<Box<RawValue>> {
+    if !matches!(shape(body), Shape::Single) {
+        return None;
+    }
+    let envelope: IdEnvelope = serde_json::from_slice(body).ok()?;
+    envelope.id.map(RawValue::to_owned)
+}
+
+pub fn readdress(body: &Bytes, id: &RawValue) -> Option<Bytes> {
+    let mut envelope: BTreeMap<&str, &RawValue> = serde_json::from_slice(body).ok()?;
+    envelope.insert("id", id);
+    serde_json::to_vec(&envelope).ok().map(Bytes::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http_body_util::BodyExt;
 
-    #[tokio::test]
-    async fn rpc_error_escapes_the_message() {
+    #[test]
+    fn rpc_error_escapes_the_message() {
         let msg = "upstream said \"nope\"\nand hung up";
-        let response = rpc_error(JSONRPC_INTERNAL_ERROR, msg);
+        let bytes = rpc_error_body(JSONRPC_INTERNAL_ERROR, msg);
 
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(parsed["error"]["message"], msg);
@@ -271,5 +290,119 @@ mod tests {
     fn a_batch_counts_as_a_write() {
         let body = Bytes::from(r#"[{"jsonrpc":"2.0","id":1,"method":"eth_call"}]"#);
         assert!(is_write(&body));
+    }
+
+    fn id_of(body: &str) -> Option<String> {
+        request_id(&Bytes::from(body.to_owned())).map(|id| id.get().to_owned())
+    }
+
+    #[test]
+    fn the_id_is_kept_as_written() {
+        assert_eq!(
+            id_of(r#"{"jsonrpc":"2.0","id":1,"method":"eth_call"}"#).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            id_of(r#"{"jsonrpc":"2.0","id":"0x01","method":"eth_call"}"#).as_deref(),
+            Some(r#""0x01""#),
+            "a string id stays a string — the caller matches on it verbatim"
+        );
+    }
+
+    #[test]
+    fn a_null_id_is_an_id() {
+        assert_eq!(
+            id_of(r#"{"jsonrpc":"2.0","id":null,"method":"eth_call"}"#).as_deref(),
+            Some("null"),
+            "only a missing id makes a notification"
+        );
+    }
+
+    #[test]
+    fn a_notification_has_no_id() {
+        assert_eq!(id_of(r#"{"jsonrpc":"2.0","method":"eth_call"}"#), None);
+    }
+
+    #[test]
+    fn a_body_that_is_not_an_object_has_no_id() {
+        for body in [r#"[{"id":1}]"#, "not json", "7"] {
+            assert_eq!(id_of(body), None, "{body}");
+        }
+    }
+
+    fn reply(body: &str, id: &str) -> String {
+        let id = RawValue::from_string(id.to_owned()).unwrap();
+        let out = readdress(&Bytes::from(body.to_owned()), &id)
+            .expect("a JSON-RPC body must be re-addressable");
+        String::from_utf8(out.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn each_follower_gets_its_own_id() {
+        let leader = r#"{"jsonrpc":"2.0","id":1,"result":"0x10"}"#;
+
+        for id in ["7", r#""abc""#, "null"] {
+            let out: serde_json::Value = serde_json::from_str(&reply(leader, id)).unwrap();
+            let want: serde_json::Value = serde_json::from_str(id).unwrap();
+            assert_eq!(
+                out["id"], want,
+                "a client matches responses to requests by id — the leader's id is a wrong answer"
+            );
+            assert_eq!(out["result"], "0x10", "the answer itself is untouched");
+        }
+    }
+
+    #[test]
+    fn the_result_comes_through_byte_for_byte() {
+        let leader = r#"{"jsonrpc":"2.0","id":1,"result":{"z":1,"a":2.50,"n":1e3}}"#;
+
+        let out = reply(leader, "9");
+
+        assert!(
+            out.contains(r#""result":{"z":1,"a":2.50,"n":1e3}"#),
+            "via `Value` the keys come back sorted and 2.50 / 1e3 as 2.5 / 1000.0 — got {out}"
+        );
+    }
+
+    #[test]
+    fn a_null_result_stays_null() {
+        let leader = r#"{"jsonrpc":"2.0","id":1,"result":null}"#;
+
+        let out = reply(leader, "2");
+
+        assert!(
+            out.contains(r#""result":null"#),
+            "null is an answer (\"no such block yet\"), not a missing field — got {out}"
+        );
+    }
+
+    #[test]
+    fn errors_are_readdressed_too() {
+        let leader =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution reverted"}}"#;
+
+        let out = reply(leader, "3");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        assert_eq!(
+            parsed["id"], 3,
+            "a shared failure still goes to the right caller"
+        );
+        assert!(
+            out.contains(r#""error":{"code":-32000,"message":"execution reverted"}"#),
+            "the error object is untouched — got {out}"
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_an_object_gets_no_reply() {
+        let id = RawValue::from_string("1".to_owned()).unwrap();
+        for body in ["not json", "[1,2]", r#""str""#] {
+            assert_eq!(
+                readdress(&Bytes::from(body), &id),
+                None,
+                "{body}: no envelope to re-address — send this one on its own"
+            );
+        }
     }
 }
