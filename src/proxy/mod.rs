@@ -182,7 +182,7 @@ impl Pipeline {
                 self.observer.as_ref(),
                 upstream,
                 body,
-                start.attempt,
+                start.index as u64 + 1,
                 start.overtaken.is_some(),
             )
         })
@@ -197,7 +197,7 @@ impl Pipeline {
             result: raced
                 .result
                 .map(|(index, response)| (response, chain[index].id())),
-            tried: chain[..raced.attempts].iter().map(|u| u.id()).collect(),
+            tried: chain[..raced.started].iter().map(|u| u.id()).collect(),
             hedge: Some((raced.hedges, raced.hedge_won)),
         }
     }

@@ -7,7 +7,8 @@ use crate::upstream::{Upstream, call::CallError};
 
 /// Which call the racer is starting, and why.
 pub(super) struct Start<'a> {
-    pub attempt: u64,
+    /// Position in the chain, from 0.
+    pub index: usize,
     /// `Some` when the timer started it: the upstream that ran past its
     /// `hedge_after`, always the one just before it in the chain, since the
     /// timer only ever waits on the latest start. `None` for the first call and
@@ -21,7 +22,7 @@ pub(super) struct Raced<T> {
     /// nothing was started.
     pub result: Result<(usize, T), Option<CallError>>,
     /// Calls started, hedges included. Always a prefix of the chain.
-    pub attempts: usize,
+    pub started: usize,
     pub hedges: usize,
     pub hedge_won: bool,
 }
@@ -48,7 +49,7 @@ where
     let limit = chain.len().min(max_attempt);
     let launch = |call: &mut F, index: usize, hedge: bool| {
         let start = Start {
-            attempt: index as u64 + 1,
+            index,
             overtaken: hedge.then(|| chain[index - 1].as_ref()),
         };
         let pending = call(&chain[index], start);
@@ -70,7 +71,7 @@ where
         if inflight.is_empty() && !more {
             return Raced {
                 result: Err(last_failure),
-                attempts: next,
+                started: next,
                 hedges,
                 hedge_won: false,
             };
@@ -85,7 +86,7 @@ where
                 Ok(answer) => {
                     return Raced {
                         result: Ok((index, answer)),
-                        attempts: next,
+                        started: next,
                         hedges,
                         hedge_won: hedge,
                     };
@@ -93,7 +94,7 @@ where
                 Err(failure) if !failure.is_retryable() => {
                     return Raced {
                         result: Err(Some(failure)),
-                        attempts: next,
+                        started: next,
                         hedges,
                         hedge_won: false,
                     };
@@ -286,7 +287,7 @@ mod tests {
             Err("second".to_string()),
             "the chain is exhausted"
         );
-        assert_eq!(out.attempts, 2);
+        assert_eq!(out.started, 2);
         assert_eq!(out.hedges, 0, "both were retries");
     }
 
@@ -308,7 +309,7 @@ mod tests {
             Ok("first"),
             "nothing faster was allowed to start"
         );
-        assert_eq!(out.attempts, 2);
+        assert_eq!(out.started, 2);
         assert_eq!(out.hedges, 1);
         assert_eq!(
             fakes[2].entered.get(),
@@ -338,6 +339,6 @@ mod tests {
         let out = run(&[], &[], 3).await;
 
         assert!(matches!(out.result, Err(None)));
-        assert_eq!(out.attempts, 0);
+        assert_eq!(out.started, 0);
     }
 }
