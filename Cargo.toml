@@ -23,6 +23,7 @@ uuid = { version = "1.24.0", features = ["v4"] }
 bon = "3.9.3"
 futures-util = "0.3.33"
 memchr = "2.8.3"
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["test-util"] }
