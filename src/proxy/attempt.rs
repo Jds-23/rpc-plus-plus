@@ -1,12 +1,9 @@
-use axum::{
-    body::Bytes,
-    response::{IntoResponse, Response},
-};
-use reqwest::header;
+use axum::body::Bytes;
 use tracing::{info, warn};
 
 use crate::{
     observer::Observer,
+    proxy::reply::Reply,
     upstream::{Upstream, call::CallError, call::CallOutcome},
 };
 
@@ -16,7 +13,7 @@ pub(super) async fn try_once(
     body: &Bytes,
     attempt: u64,
     hedge: bool,
-) -> Result<Response, CallError> {
+) -> Result<Reply, CallError> {
     let id = upstream.id();
     info!(
         event = "attempt_started",
@@ -40,12 +37,10 @@ pub(super) async fn try_once(
                 http_status = http_status.as_u16(),
                 response_bytes = response_body.len(),
             );
-            Ok((
+            Ok(Reply {
                 http_status,
-                [(header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())],
-                response_body,
-            )
-                .into_response())
+                body: response_body,
+            })
         }
         Err(failure) => {
             match &failure {

@@ -1,12 +1,10 @@
-use std::{borrow::Cow, sync::LazyLock};
+use std::{borrow::Cow, collections::BTreeMap, io, sync::LazyLock};
 
-use axum::{
-    Json,
-    body::Bytes,
-    response::{IntoResponse, Response},
-};
+use axum::body::Bytes;
 use memchr::{memchr2, memmem};
-use reqwest::StatusCode;
+use serde::{Deserialize, Deserializer};
+use serde_json::{Value, value::RawValue};
+use xxhash_rust::xxh3::Xxh3;
 
 pub(crate) const JSONRPC_INTERNAL_ERROR: i64 = -32603;
 
@@ -135,26 +133,100 @@ fn is_idempotent_read(method: &str) -> bool {
     )
 }
 
-pub(crate) fn rpc_error(code: i64, msg: &str) -> Response {
+/// What a flight is keyed by: the question, not the caller's envelope (`id`, `jsonrpc`).
+///
+/// 128 bits, not 64: a collision merges two questions and serves one caller the other's answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct DedupKey(u128);
+
+/// `None` = send it on its own: writes, unknown methods, batches, malformed bodies.
+///
+/// Hashed from the parsed value, so whitespace never splits a key. Array order is kept —
+/// params are positional. Object keys are sorted: `Map` is a `BTreeMap` without
+/// `preserve_order`. A missing `params` asks the same question as `[]`. The quoted method
+/// string delimits itself, so method and params need no separator.
+#[cfg_attr(not(test), expect(dead_code, reason = "coalesce is the first caller"))]
+pub(crate) fn dedup_key(body: &Bytes) -> Option<DedupKey> {
+    let Value::Object(mut request) = serde_json::from_slice(body).ok()? else {
+        return None;
+    };
+    let params = request
+        .remove("params")
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    let Some(Value::String(method)) = request.get("method") else {
+        return None;
+    };
+    if !is_idempotent_read(method) {
+        return None;
+    }
+
+    let mut hasher = Xxh3Writer(Xxh3::new());
+    serde_json::to_writer(&mut hasher, method).ok()?;
+    serde_json::to_writer(&mut hasher, &params).ok()?;
+    Some(DedupKey(hasher.0.digest128()))
+}
+
+// Serializes straight into the hasher: no key string is ever allocated.
+struct Xxh3Writer(Xxh3);
+
+impl io::Write for Xxh3Writer {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) fn rpc_error_body(code: i64, msg: &str) -> Bytes {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "error": { "code": code, "message": msg },
         "id": null,
     });
-    (StatusCode::OK, Json(body)).into_response()
+    Bytes::from(body.to_string())
+}
+
+#[derive(serde::Deserialize)]
+struct IdEnvelope<'a> {
+    #[serde(borrow, default, deserialize_with = "present")]
+    id: Option<&'a RawValue>,
+}
+
+// Without it a `null` id reads as `None`; only a missing id makes a notification.
+fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<&'de RawValue>, D::Error> {
+    <&RawValue>::deserialize(d).map(Some)
+}
+
+#[cfg_attr(not(test), expect(dead_code, reason = "coalesce is the first caller"))]
+pub(crate) fn request_id(body: &Bytes) -> Option<Box<RawValue>> {
+    if !matches!(shape(body), Shape::Single) {
+        return None;
+    }
+    let envelope: IdEnvelope = serde_json::from_slice(body).ok()?;
+    envelope.id.map(RawValue::to_owned)
+}
+
+/// Swaps in `id` and leaves every other field byte for byte: via `Value`, keys
+/// come back sorted and numbers reformatted.
+#[cfg_attr(not(test), expect(dead_code, reason = "coalesce is the first caller"))]
+pub(crate) fn readdress(body: &Bytes, id: &RawValue) -> Option<Bytes> {
+    let mut envelope: BTreeMap<&str, &RawValue> = serde_json::from_slice(body).ok()?;
+    envelope.insert("id", id);
+    serde_json::to_vec(&envelope).ok().map(Bytes::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http_body_util::BodyExt;
 
-    #[tokio::test]
-    async fn rpc_error_escapes_the_message() {
+    #[test]
+    fn rpc_error_escapes_the_message() {
         let msg = "upstream said \"nope\"\nand hung up";
-        let response = rpc_error(JSONRPC_INTERNAL_ERROR, msg);
+        let bytes = rpc_error_body(JSONRPC_INTERNAL_ERROR, msg);
 
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(parsed["error"]["message"], msg);
@@ -271,5 +343,225 @@ mod tests {
     fn a_batch_counts_as_a_write() {
         let body = Bytes::from(r#"[{"jsonrpc":"2.0","id":1,"method":"eth_call"}]"#);
         assert!(is_write(&body));
+    }
+
+    fn key(body: &str) -> Option<DedupKey> {
+        dedup_key(&Bytes::from(body.to_owned()))
+    }
+
+    #[test]
+    fn the_id_is_not_part_of_the_question() {
+        let a = key(r#"{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}"#);
+        let b = key(r#"{"jsonrpc":"2.0","id":"abc","method":"eth_blockNumber","params":[]}"#);
+        assert!(a.is_some(), "eth_blockNumber is a read, it must get a key");
+        assert_eq!(
+            a, b,
+            "every caller picks its own id — keep it in the key and no two requests ever coalesce"
+        );
+    }
+
+    #[test]
+    fn object_key_order_does_not_split_the_key() {
+        let a = key(r#"{"id":1,"method":"eth_call","params":[{"to":"0x2","data":"0x"},"0x10"]}"#);
+        let b = key(r#"{"id":2,"method":"eth_call","params":[{"data":"0x","to":"0x2"},"0x10"]}"#);
+        assert_eq!(
+            a, b,
+            "JSON objects are unordered — is serde_json/preserve_order enabled via unification?"
+        );
+    }
+
+    #[test]
+    fn array_order_is_part_of_the_question() {
+        let a = key(r#"{"id":1,"method":"eth_getStorageAt","params":["0xabc","0x0","0x10"]}"#);
+        let b = key(r#"{"id":1,"method":"eth_getStorageAt","params":["0xabc","0x10","0x0"]}"#);
+        assert_ne!(
+            a, b,
+            "params are positional: slot 0 at block 16 is not slot 16 at block 0"
+        );
+    }
+
+    #[test]
+    fn whitespace_does_not_split_the_key() {
+        let a = key(r#"{"id":1,"method":"eth_getBalance","params":["0xabc","0x10"]}"#);
+        let b = key(
+            "{ \"id\" : 1 ,\n \"method\" : \"eth_getBalance\" , \"params\" : [ \"0xabc\" , \"0x10\" ] }",
+        );
+        assert_eq!(
+            a, b,
+            "the key is built from the parsed value, not the raw bytes"
+        );
+    }
+
+    #[test]
+    fn missing_params_is_the_empty_list() {
+        let a = key(r#"{"id":1,"method":"eth_chainId"}"#);
+        let b = key(r#"{"id":1,"method":"eth_chainId","params":[]}"#);
+        assert!(a.is_some(), "params is optional in JSON-RPC");
+        assert_eq!(
+            a, b,
+            "omitting params asks the same question as an empty list"
+        );
+    }
+
+    #[test]
+    fn different_questions_get_different_keys() {
+        let at_16 = key(r#"{"id":1,"method":"eth_getBalance","params":["0xabc","0x10"]}"#);
+        let at_17 = key(r#"{"id":1,"method":"eth_getBalance","params":["0xabc","0x11"]}"#);
+        let code = key(r#"{"id":1,"method":"eth_getCode","params":["0xabc","0x10"]}"#);
+        assert_ne!(
+            at_16, at_17,
+            "different params: merging them serves the wrong balance"
+        );
+        assert_ne!(
+            at_16, code,
+            "different method, same params: still a different question"
+        );
+    }
+
+    #[test]
+    fn writes_are_never_coalesced() {
+        let body = r#"{"id":1,"method":"eth_sendRawTransaction","params":["0xf8"]}"#;
+        assert_eq!(
+            key(body),
+            None,
+            "two identical sends are two intents — coalescing one away is a lost write"
+        );
+    }
+
+    #[test]
+    fn unknown_methods_fail_closed() {
+        let body = r#"{"id":1,"method":"eth_newFilter","params":[{}]}"#;
+        assert_eq!(
+            key(body),
+            None,
+            "an allowlist: unknown methods are sent on their own"
+        );
+    }
+
+    #[test]
+    fn unreadable_bodies_get_no_key() {
+        for body in [
+            r#"[{"id":1,"method":"eth_blockNumber"}]"#,
+            r#"{"id":1,"method":"eth_blockNumber""#,
+            r#"{"id":1,"method":7}"#,
+            r#"{"id":1,"params":[]}"#,
+            r#""eth_blockNumber""#,
+        ] {
+            assert_eq!(key(body), None, "{body} must be sent on its own, not keyed");
+        }
+    }
+
+    fn id_of(body: &str) -> Option<String> {
+        request_id(&Bytes::from(body.to_owned())).map(|id| id.get().to_owned())
+    }
+
+    #[test]
+    fn the_id_is_kept_as_written() {
+        assert_eq!(
+            id_of(r#"{"jsonrpc":"2.0","id":1,"method":"eth_call"}"#).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            id_of(r#"{"jsonrpc":"2.0","id":"0x01","method":"eth_call"}"#).as_deref(),
+            Some(r#""0x01""#),
+            "a string id stays a string — the caller matches on it verbatim"
+        );
+    }
+
+    #[test]
+    fn a_null_id_is_an_id() {
+        assert_eq!(
+            id_of(r#"{"jsonrpc":"2.0","id":null,"method":"eth_call"}"#).as_deref(),
+            Some("null"),
+            "only a missing id makes a notification"
+        );
+    }
+
+    #[test]
+    fn a_notification_has_no_id() {
+        assert_eq!(id_of(r#"{"jsonrpc":"2.0","method":"eth_call"}"#), None);
+    }
+
+    #[test]
+    fn a_body_that_is_not_an_object_has_no_id() {
+        for body in [r#"[{"id":1}]"#, "not json", "7"] {
+            assert_eq!(id_of(body), None, "{body}");
+        }
+    }
+
+    fn reply(body: &str, id: &str) -> String {
+        let id = RawValue::from_string(id.to_owned()).unwrap();
+        let out = readdress(&Bytes::from(body.to_owned()), &id)
+            .expect("a JSON-RPC body must be re-addressable");
+        String::from_utf8(out.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn each_follower_gets_its_own_id() {
+        let leader = r#"{"jsonrpc":"2.0","id":1,"result":"0x10"}"#;
+
+        for id in ["7", r#""abc""#, "null"] {
+            let out: serde_json::Value = serde_json::from_str(&reply(leader, id)).unwrap();
+            let want: serde_json::Value = serde_json::from_str(id).unwrap();
+            assert_eq!(
+                out["id"], want,
+                "a client matches responses to requests by id — the leader's id is a wrong answer"
+            );
+            assert_eq!(out["result"], "0x10", "the answer itself is untouched");
+        }
+    }
+
+    #[test]
+    fn the_result_comes_through_byte_for_byte() {
+        let leader = r#"{"jsonrpc":"2.0","id":1,"result":{"z":1,"a":2.50,"n":1e3}}"#;
+
+        let out = reply(leader, "9");
+
+        assert!(
+            out.contains(r#""result":{"z":1,"a":2.50,"n":1e3}"#),
+            "via `Value` the keys come back sorted and 2.50 / 1e3 as 2.5 / 1000.0 — got {out}"
+        );
+    }
+
+    #[test]
+    fn a_null_result_stays_null() {
+        let leader = r#"{"jsonrpc":"2.0","id":1,"result":null}"#;
+
+        let out = reply(leader, "2");
+
+        assert!(
+            out.contains(r#""result":null"#),
+            "null is an answer (\"no such block yet\"), not a missing field — got {out}"
+        );
+    }
+
+    #[test]
+    fn errors_are_readdressed_too() {
+        let leader =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution reverted"}}"#;
+
+        let out = reply(leader, "3");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        assert_eq!(
+            parsed["id"], 3,
+            "a shared failure still goes to the right caller"
+        );
+        assert!(
+            out.contains(r#""error":{"code":-32000,"message":"execution reverted"}"#),
+            "the error object is untouched — got {out}"
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_an_object_gets_no_reply() {
+        let id = RawValue::from_string("1".to_owned()).unwrap();
+        for body in ["not json", "[1,2]", r#""str""#] {
+            assert_eq!(
+                readdress(&Bytes::from(body), &id),
+                None,
+                "{body}: no envelope to re-address — send this one on its own"
+            );
+        }
     }
 }
