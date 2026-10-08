@@ -16,8 +16,11 @@ use uuid::Uuid;
 use crate::{
     decider::Decider,
     jsonrpc::{JSONRPC_INTERNAL_ERROR, Shape, is_write, rpc_error, shape},
-    observer::Observer,
-    proxy::{attempt::try_once, hedge::race},
+    observer::{Observer, snapshot::HedgeSnapshot},
+    proxy::{
+        attempt::try_once,
+        hedge::{Won, race},
+    },
     upstream::{Upstream, UpstreamId, call::CallError},
 };
 
@@ -34,10 +37,25 @@ pub struct Pipeline {
 
 /// How a request ended, whichever path ran it.
 struct Finished<'c> {
-    result: Result<(Response, &'c UpstreamId), Option<CallError>>,
+    result: Result<Answered<'c>, Failure>,
     tried: Vec<&'c UpstreamId>,
-    /// `(hedges, hedge_won)`; `None` when hedging is off.
-    hedge: Option<(usize, bool)>,
+    /// For this one request: `won` is 1 when a hedge answered first, else 0.
+    /// `None` when hedging is off.
+    hedge: Option<HedgeSnapshot>,
+}
+
+struct Answered<'c> {
+    response: Response,
+    upstream: &'c UpstreamId,
+}
+
+/// Why a request got no answer.
+#[derive(Debug, thiserror::Error)]
+enum Failure {
+    #[error("no upstream available")]
+    NoUpstream,
+    #[error(transparent)]
+    Call(CallError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -128,7 +146,10 @@ impl Pipeline {
             {
                 Ok(response) => {
                     return Finished {
-                        result: Ok((response, upstream.id())),
+                        result: Ok(Answered {
+                            response,
+                            upstream: upstream.id(),
+                        }),
                         tried,
                         hedge: None,
                     };
@@ -144,7 +165,7 @@ impl Pipeline {
         }
 
         Finished {
-            result: Err(last_failure),
+            result: Err(last_failure.map_or(Failure::NoUpstream, Failure::Call)),
             tried,
             hedge: None,
         }
@@ -154,21 +175,25 @@ impl Pipeline {
     /// The first send may land even when it reports failure, so a second call
     /// risks a double send.
     async fn send_once<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
+        let no_hedge = HedgeSnapshot { started: 0, won: 0 };
         let Some(upstream) = chain.first() else {
             return Finished {
-                result: Err(None),
+                result: Err(Failure::NoUpstream),
                 tried: Vec::new(),
-                hedge: Some((0, false)),
+                hedge: Some(no_hedge),
             };
         };
         let result = try_once(self.observer.as_ref(), upstream, body, 1, false).await;
 
         Finished {
             result: result
-                .map(|response| (response, upstream.id()))
-                .map_err(Some),
+                .map(|response| Answered {
+                    response,
+                    upstream: upstream.id(),
+                })
+                .map_err(Failure::Call),
             tried: vec![upstream.id()],
-            hedge: Some((0, false)),
+            hedge: Some(no_hedge),
         }
     }
 
@@ -188,17 +213,18 @@ impl Pipeline {
         })
         .await;
         // A hedge always overtakes the upstream just before it (see `Start`).
-        if let (true, Ok((index, _))) = (raced.hedge_won, &raced.result) {
+        if let (1, Ok(Won { index, .. })) = (raced.hedge.won, &raced.result) {
             self.observer
                 .record_hedge_win(chain[*index - 1].id(), chain[*index].id());
         }
 
         Finished {
-            result: raced
-                .result
-                .map(|(index, response)| (response, chain[index].id())),
+            result: raced.result.map(|Won { index, answer }| Answered {
+                response: answer,
+                upstream: chain[index].id(),
+            }),
             tried: chain[..raced.started].iter().map(|u| u.id()).collect(),
-            hedge: Some((raced.hedges, raced.hedge_won)),
+            hedge: Some(raced.hedge),
         }
     }
 }
@@ -209,10 +235,11 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
         tried,
         hedge,
     } = finished;
-    let (hedges, hedge_won) = hedge.unzip();
+    let hedges = hedge.map(|hedge| hedge.started);
+    let hedge_won = hedge.map(|hedge| hedge.won > 0);
 
     match result {
-        Ok((response, upstream)) => {
+        Ok(Answered { response, upstream }) => {
             info!(
                 event = "request_completed",
                 attempts = tried.len(),
@@ -223,11 +250,8 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
             );
             response
         }
-        Err(last_failure) => {
-            let error = match &last_failure {
-                Some(failure) => failure.to_string(),
-                None => "no upstream available".to_string(),
-            };
+        Err(failure) => {
+            let error = failure.to_string();
 
             error!(
                 event = "retries_exhausted",
