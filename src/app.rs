@@ -11,7 +11,7 @@ use crate::{
     decider::{Decider, prefer_least_errors::PreferLeastErrors, round_robin::RoundRobin},
     http,
     observer::{MetricsObserver, prometheus::Collector},
-    proxy::Pipeline,
+    proxy::{Dispatch, Pipeline},
     upstream::{Upstream, build_all, build_http_client},
 };
 
@@ -46,7 +46,11 @@ impl Application {
             .observer(observer)
             .max_attempt(settings.proxy.max_attempt)
             .retry_after(Duration::from_secs(settings.proxy.retry_after_in_secs))
-            .hedging(settings.proxy.hedge.enabled)
+            .dispatch(if settings.proxy.hedge.enabled {
+                Dispatch::Hedged
+            } else {
+                Dispatch::Sequential
+            })
             .build()?;
 
         let router = http::build_router(Arc::new(pipeline), Arc::new(registry));

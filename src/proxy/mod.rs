@@ -32,7 +32,14 @@ pub struct Pipeline {
     decider: Arc<dyn Decider>,
     max_attempt: usize,
     retry_after: Duration,
-    hedging: bool,
+    dispatch: Dispatch,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Dispatch {
+    #[default]
+    Sequential,
+    Hedged,
 }
 
 /// How a request ended, whichever path ran it.
@@ -40,7 +47,7 @@ struct Finished<'c> {
     result: Result<Answered<'c>, Failure>,
     tried: Vec<&'c UpstreamId>,
     /// For this one request: `won` is 1 when a hedge answered first, else 0.
-    /// `None` when hedging is off.
+    /// `None` under `Dispatch::Sequential`.
     hedge: Option<HedgeSnapshot>,
 }
 
@@ -49,7 +56,6 @@ struct Answered<'c> {
     upstream: &'c UpstreamId,
 }
 
-/// Why a request got no answer.
 #[derive(Debug, thiserror::Error)]
 enum Failure {
     #[error("no upstream available")]
@@ -72,7 +78,7 @@ impl Pipeline {
         observer: Arc<dyn Observer>,
         #[builder(default = DEFAULT_MAX_ATTEMPT)] max_attempt: u64,
         #[builder(default = DEFAULT_RETRY_AFTER)] retry_after: Duration,
-        #[builder(default)] hedging: bool,
+        #[builder(default)] dispatch: Dispatch,
     ) -> Result<Self, BuildError> {
         if max_attempt == 0 {
             return Err(BuildError::ZeroMaxAttempt);
@@ -82,7 +88,7 @@ impl Pipeline {
             observer,
             max_attempt: max_attempt as usize,
             retry_after,
-            hedging,
+            dispatch,
         })
     }
 }
@@ -104,10 +110,10 @@ impl Pipeline {
             }
             Shape::Single => {
                 let chain = self.decider.decide(self.max_attempt);
-                let finished = match (self.hedging, is_write(&body)) {
-                    (true, false) => self.race(&chain, &body).await,
-                    (true, true) => self.send_once(&chain, &body).await,
-                    (false, _) => self.walk(&chain, &body).await,
+                let finished = match (self.dispatch, is_write(&body)) {
+                    (Dispatch::Hedged, false) => self.race(&chain, &body).await,
+                    (Dispatch::Hedged, true) => self.send_once(&chain, &body).await,
+                    (Dispatch::Sequential, _) => self.walk(&chain, &body).await,
                 };
                 finish(finished, received_at)
             }
@@ -171,7 +177,7 @@ impl Pipeline {
         }
     }
 
-    /// A write while hedging is on: the head of the chain and nothing else.
+    /// A write under `Dispatch::Hedged`: the head of the chain and nothing else.
     /// The first send may land even when it reports failure, so a second call
     /// risks a double send.
     async fn send_once<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {

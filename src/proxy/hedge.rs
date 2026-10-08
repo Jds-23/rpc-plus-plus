@@ -11,7 +11,6 @@ use crate::{
 
 /// Which call the racer is starting, and why.
 pub(super) struct Start<'a> {
-    /// Position in the chain, from 0.
     pub index: usize,
     /// `Some` when the timer started it: the upstream that ran past its
     /// `hedge_after`, always the one just before it in the chain, since the
@@ -20,16 +19,13 @@ pub(super) struct Start<'a> {
     pub overtaken: Option<&'a Upstream>,
 }
 
-/// The call that answered first.
 pub(super) struct Won<T> {
-    /// Position in the chain, from 0.
     pub index: usize,
     pub answer: T,
 }
 
 /// What a race did, not just what it answered.
 pub(super) struct Raced<T> {
-    /// The winner, or the last failure.
     pub result: Result<Won<T>, Failure>,
     /// Calls started, hedges included. Always a prefix of the chain.
     pub started: usize,
