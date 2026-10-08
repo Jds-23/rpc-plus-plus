@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), expect(dead_code, reason = "coalesce is the first caller"))]
-
 mod evict;
 
 use std::sync::{

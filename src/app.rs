@@ -51,6 +51,7 @@ impl Application {
             } else {
                 Dispatch::Sequential
             })
+            .dedup(settings.proxy.dedup.enabled)
             .build()?;
 
         let router = http::build_router(Arc::new(pipeline), Arc::new(registry));
