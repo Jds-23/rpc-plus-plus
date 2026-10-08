@@ -86,15 +86,15 @@ struct MethodEnvelope<'a> {
 // No byte prefilter: a skip can't prove `method` exists, and misses `\u` escapes.
 pub(crate) fn is_write(body: &Bytes) -> bool {
     match serde_json::from_slice::<MethodEnvelope>(body) {
-        Ok(envelope) => !is_hedge_safe(&envelope.method),
-        // Batches, missing or non-string methods. Never hedge what we can't classify.
+        Ok(envelope) => !is_idempotent_read(&envelope.method),
+        // Batches, missing or non-string methods. Never treat what we can't classify as a read.
         Err(_) => true,
     }
 }
 
-// An allowlist, so an unknown write fails closed: a missing read only loses a hedge.
+// An allowlist, so an unknown write fails closed: a missing read is only treated as a write.
 // Filters are out on purpose — each node keeps its own, and polling one consumes it.
-fn is_hedge_safe(method: &str) -> bool {
+fn is_idempotent_read(method: &str) -> bool {
     matches!(
         method,
         "eth_blockNumber"
