@@ -9,7 +9,9 @@ use std::{
 use tracing::warn;
 
 use crate::{
-    observer::snapshot::{BUCKET_BOUNDS_MICROS, HedgeCount, HedgeStats, Snapshot, UpstreamStats},
+    observer::snapshot::{
+        BUCKET_BOUNDS_MICROS, HedgeSnapshot, HedgeStats, Snapshot, UpstreamStats,
+    },
     upstream::{
         UpstreamId,
         call::{CallError, CallRecord},
@@ -28,7 +30,7 @@ pub struct MetricsObserver {
     stats: HashMap<UpstreamId, Arc<UpstreamStats>>,
     /// Keyed `(overtaken, to)`. Every ordered pair exists up front, so recording
     /// never takes a lock.
-    hedges: HashMap<(UpstreamId, UpstreamId), HedgeStats>,
+    hedges: HashMap<(UpstreamId, UpstreamId), Arc<HedgeStats>>,
 }
 
 impl MetricsObserver {
@@ -40,7 +42,10 @@ impl MetricsObserver {
         let mut hedges = HashMap::new();
         for overtaken in stats.keys() {
             for to in stats.keys().filter(|to| *to != overtaken) {
-                hedges.insert((overtaken.clone(), to.clone()), HedgeStats::default());
+                hedges.insert(
+                    (overtaken.clone(), to.clone()),
+                    Arc::new(HedgeStats::default()),
+                );
             }
         }
         MetricsObserver { stats, hedges }
@@ -62,13 +67,13 @@ impl MetricsObserver {
     }
 
     /// `None` for a pair this observer was not built with.
-    pub fn hedge_count(&self, overtaken: &UpstreamId, to: &UpstreamId) -> Option<HedgeCount> {
+    pub fn hedge_snapshot(&self, overtaken: &UpstreamId, to: &UpstreamId) -> Option<HedgeSnapshot> {
         let key = (overtaken.clone(), to.clone());
         Some(self.hedges.get(&key)?.snapshot())
     }
 
     /// Sorted by `(overtaken, to)` label, like `snapshots`.
-    pub fn hedge_snapshots(&self) -> Vec<(&UpstreamId, &UpstreamId, HedgeCount)> {
+    pub fn hedge_snapshots(&self) -> Vec<(&UpstreamId, &UpstreamId, HedgeSnapshot)> {
         let mut out: Vec<_> = self
             .hedges
             .iter()
@@ -80,7 +85,7 @@ impl MetricsObserver {
         out
     }
 
-    fn hedge_stats(&self, overtaken: &UpstreamId, to: &UpstreamId) -> Option<&HedgeStats> {
+    fn hedge_stats(&self, overtaken: &UpstreamId, to: &UpstreamId) -> Option<&Arc<HedgeStats>> {
         let stat = self.hedges.get(&(overtaken.clone(), to.clone()));
         if stat.is_none() {
             warn!(event = "metrics_upstream_unknown", upstream = %overtaken, to = %to);
@@ -334,15 +339,15 @@ mod tests {
         observer.record_hedge_win(&one, &two);
 
         assert_eq!(
-            observer.hedge_count(&one, &two),
-            Some(HedgeCount { started: 2, won: 1 })
+            observer.hedge_snapshot(&one, &two),
+            Some(HedgeSnapshot { started: 2, won: 1 })
         );
         assert_eq!(
-            observer.hedge_count(&two, &one),
-            Some(HedgeCount { started: 0, won: 0 }),
+            observer.hedge_snapshot(&two, &one),
+            Some(HedgeSnapshot { started: 0, won: 0 }),
             "the reverse pair is its own series"
         );
-        assert_eq!(observer.hedge_count(&one, &one), None, "no self pair");
+        assert_eq!(observer.hedge_snapshot(&one, &one), None, "no self pair");
     }
 
     #[test]

@@ -61,8 +61,8 @@ pub struct HedgeStats {
 }
 
 impl HedgeStats {
-    pub fn snapshot(&self) -> HedgeCount {
-        HedgeCount {
+    pub fn snapshot(&self) -> HedgeSnapshot {
+        HedgeSnapshot {
             started: self.started.load(Ordering::Relaxed),
             won: self.won.load(Ordering::Relaxed),
         }
@@ -70,7 +70,7 @@ impl HedgeStats {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HedgeCount {
+pub struct HedgeSnapshot {
     pub started: u64,
     pub won: u64,
 }
