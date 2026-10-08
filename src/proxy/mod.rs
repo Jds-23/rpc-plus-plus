@@ -1,6 +1,7 @@
 pub mod attempt;
 mod hedge;
 mod reply;
+mod singleflight;
 
 use axum::{
     body::Bytes,
@@ -30,6 +31,11 @@ const DEFAULT_MAX_ATTEMPT: u64 = 3;
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 pub struct Pipeline {
+    core: Arc<Core>,
+}
+
+/// The pipeline's state, shareable so a request's run can own it (`'static`).
+struct Core {
     observer: Arc<dyn Observer>,
     decider: Arc<dyn Decider>,
     max_attempt: usize,
@@ -86,11 +92,13 @@ impl Pipeline {
             return Err(BuildError::ZeroMaxAttempt);
         }
         Ok(Self {
-            decider,
-            observer,
-            max_attempt: max_attempt as usize,
-            retry_after,
-            dispatch,
+            core: Arc::new(Core {
+                decider,
+                observer,
+                max_attempt: max_attempt as usize,
+                retry_after,
+                dispatch,
+            }),
         })
     }
 }
@@ -111,13 +119,10 @@ impl Pipeline {
                 StatusCode::BAD_REQUEST.into_response()
             }
             Shape::Single => {
-                let chain = self.decider.decide(self.max_attempt);
-                let finished = match (self.dispatch, is_write(&body)) {
-                    (Dispatch::Hedged, false) => self.race(&chain, &body).await,
-                    (Dispatch::Hedged, true) => self.send_once(&chain, &body).await,
-                    (Dispatch::Sequential, _) => self.walk(&chain, &body).await,
-                };
-                finish(finished, received_at).into_response()
+                let chain = self.core.decider.decide(self.core.max_attempt);
+                run(self.core.clone(), chain, body, received_at)
+                    .await
+                    .into_response()
             }
             Shape::Malformed => {
                 warn!(event = "batch_malformed", body_bytes = body.len());
@@ -127,7 +132,23 @@ impl Pipeline {
     }
 }
 
-impl Pipeline {
+/// One request, start to finish. Owns everything it touches, so it can run as
+/// a flight that outlives the caller who started it.
+async fn run(
+    core: Arc<Core>,
+    chain: Vec<Arc<Upstream>>,
+    body: Bytes,
+    received_at: Instant,
+) -> Reply {
+    let finished = match (core.dispatch, is_write(&body)) {
+        (Dispatch::Hedged, false) => core.race(&chain, &body).await,
+        (Dispatch::Hedged, true) => core.send_once(&chain, &body).await,
+        (Dispatch::Sequential, _) => core.walk(&chain, &body).await,
+    };
+    finish(finished, received_at)
+}
+
+impl Core {
     /// One upstream at a time, `retry_after` between them.
     async fn walk<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
         let mut tried: Vec<&UpstreamId> = Vec::with_capacity(chain.len());
@@ -275,4 +296,17 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Reply {
 
 fn elapsed_ms(since: Instant) -> u64 {
     since.elapsed().as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn static_send<F: Future + Send + 'static>(_: F) {}
+
+    // Never called: it compiles only while `run` is `Send + 'static`.
+    #[allow(dead_code)]
+    fn run_can_be_a_flight(core: Arc<Core>) {
+        static_send(run(core, Vec::new(), Bytes::new(), Instant::now()));
+    }
 }
