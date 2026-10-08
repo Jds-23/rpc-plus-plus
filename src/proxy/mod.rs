@@ -1,5 +1,6 @@
 pub mod attempt;
 mod hedge;
+mod reply;
 
 use axum::{
     body::Bytes,
@@ -15,11 +16,12 @@ use uuid::Uuid;
 
 use crate::{
     decider::Decider,
-    jsonrpc::{JSONRPC_INTERNAL_ERROR, Shape, is_write, rpc_error, shape},
+    jsonrpc::{JSONRPC_INTERNAL_ERROR, Shape, is_write, shape},
     observer::{Observer, snapshot::HedgeSnapshot},
     proxy::{
         attempt::try_once,
         hedge::{Won, race},
+        reply::Reply,
     },
     upstream::{Upstream, UpstreamId, call::CallError},
 };
@@ -52,7 +54,7 @@ struct Finished<'c> {
 }
 
 struct Answered<'c> {
-    response: Response,
+    reply: Reply,
     upstream: &'c UpstreamId,
 }
 
@@ -115,7 +117,7 @@ impl Pipeline {
                     (Dispatch::Hedged, true) => self.send_once(&chain, &body).await,
                     (Dispatch::Sequential, _) => self.walk(&chain, &body).await,
                 };
-                finish(finished, received_at)
+                finish(finished, received_at).into_response()
             }
             Shape::Malformed => {
                 warn!(event = "batch_malformed", body_bytes = body.len());
@@ -150,10 +152,10 @@ impl Pipeline {
             )
             .await
             {
-                Ok(response) => {
+                Ok(reply) => {
                     return Finished {
                         result: Ok(Answered {
-                            response,
+                            reply,
                             upstream: upstream.id(),
                         }),
                         tried,
@@ -193,8 +195,8 @@ impl Pipeline {
 
         Finished {
             result: result
-                .map(|response| Answered {
-                    response,
+                .map(|reply| Answered {
+                    reply,
                     upstream: upstream.id(),
                 })
                 .map_err(Failure::Call),
@@ -226,7 +228,7 @@ impl Pipeline {
 
         Finished {
             result: raced.result.map(|Won { index, answer }| Answered {
-                response: answer,
+                reply: answer,
                 upstream: chain[index].id(),
             }),
             tried: chain[..raced.started].iter().map(|u| u.id()).collect(),
@@ -235,7 +237,7 @@ impl Pipeline {
     }
 }
 
-fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
+fn finish(finished: Finished<'_>, received_at: Instant) -> Reply {
     let Finished {
         result,
         tried,
@@ -245,7 +247,7 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
     let hedge_won = hedge.map(|hedge| hedge.won > 0);
 
     match result {
-        Ok(Answered { response, upstream }) => {
+        Ok(Answered { reply, upstream }) => {
             info!(
                 event = "request_completed",
                 attempts = tried.len(),
@@ -254,7 +256,7 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
                 hedges,
                 hedge_won,
             );
-            response
+            reply
         }
         Err(failure) => {
             let error = failure.to_string();
@@ -266,7 +268,7 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Response {
                 duration_ms = elapsed_ms(received_at),
                 error = %error,
             );
-            rpc_error(JSONRPC_INTERNAL_ERROR, &error)
+            Reply::rpc_error(JSONRPC_INTERNAL_ERROR, &error)
         }
     }
 }
