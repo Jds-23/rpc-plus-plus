@@ -3,11 +3,15 @@ use std::sync::Arc;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tracing::info;
 
-use crate::upstream::{Upstream, call::CallError};
+use crate::{
+    observer::snapshot::HedgeSnapshot,
+    proxy::Failure,
+    upstream::{Upstream, call::CallError},
+};
 
 /// Which call the racer is starting, and why.
 pub(super) struct Start<'a> {
-    pub attempt: u64,
+    pub index: usize,
     /// `Some` when the timer started it: the upstream that ran past its
     /// `hedge_after`, always the one just before it in the chain, since the
     /// timer only ever waits on the latest start. `None` for the first call and
@@ -15,15 +19,18 @@ pub(super) struct Start<'a> {
     pub overtaken: Option<&'a Upstream>,
 }
 
+pub(super) struct Won<T> {
+    pub index: usize,
+    pub answer: T,
+}
+
 /// What a race did, not just what it answered.
 pub(super) struct Raced<T> {
-    /// The winner's chain index and answer, or the last failure. `None` when
-    /// nothing was started.
-    pub result: Result<(usize, T), Option<CallError>>,
+    pub result: Result<Won<T>, Failure>,
     /// Calls started, hedges included. Always a prefix of the chain.
-    pub attempts: usize,
-    pub hedges: usize,
-    pub hedge_won: bool,
+    pub started: usize,
+    /// For this one race: `won` is 1 when a hedge answered first, else 0.
+    pub hedge: HedgeSnapshot,
 }
 
 /// Races `chain`, staggered by each upstream's `hedge_after`.
@@ -48,7 +55,7 @@ where
     let limit = chain.len().min(max_attempt);
     let launch = |call: &mut F, index: usize, hedge: bool| {
         let start = Start {
-            attempt: index as u64 + 1,
+            index,
             overtaken: hedge.then(|| chain[index - 1].as_ref()),
         };
         let pending = call(&chain[index], start);
@@ -57,7 +64,7 @@ where
 
     let mut inflight = FuturesUnordered::new();
     let mut next = 0;
-    let mut hedges = 0;
+    let mut hedge = HedgeSnapshot { started: 0, won: 0 };
     let mut last_failure = None;
 
     if limit > 0 {
@@ -69,10 +76,9 @@ where
         let more = next < limit;
         if inflight.is_empty() && !more {
             return Raced {
-                result: Err(last_failure),
-                attempts: next,
-                hedges,
-                hedge_won: false,
+                result: Err(last_failure.map_or(Failure::NoUpstream, Failure::Call)),
+                started: next,
+                hedge,
             };
         }
         // Rebuilt every pass on purpose: patience runs from the latest start,
@@ -81,21 +87,20 @@ where
 
         tokio::select! {
             biased;
-            Some((index, hedge, result)) = inflight.next() => match result {
+            Some((index, hedged, result)) = inflight.next() => match result {
                 Ok(answer) => {
+                    hedge.won = u64::from(hedged);
                     return Raced {
-                        result: Ok((index, answer)),
-                        attempts: next,
-                        hedges,
-                        hedge_won: hedge,
+                        result: Ok(Won { index, answer }),
+                        started: next,
+                        hedge,
                     };
                 }
                 Err(failure) if !failure.is_retryable() => {
                     return Raced {
-                        result: Err(Some(failure)),
-                        attempts: next,
-                        hedges,
-                        hedge_won: false,
+                        result: Err(Failure::Call(failure)),
+                        started: next,
+                        hedge,
                     };
                 }
                 Err(failure) => {
@@ -115,7 +120,7 @@ where
                 );
                 inflight.push(launch(&mut call, next, true));
                 next += 1;
-                hedges += 1;
+                hedge.started += 1;
             }
         }
     }
@@ -209,12 +214,11 @@ mod tests {
     }
 
     fn answer(raced: &Raced<&'static str>) -> Result<&'static str, String> {
-        match &raced.result {
-            Ok((_, name)) => Ok(name),
-            Err(failure) => Err(failure
-                .as_ref()
-                .map_or("nothing started".to_string(), ToString::to_string)),
-        }
+        raced
+            .result
+            .as_ref()
+            .map(|won| won.answer)
+            .map_err(ToString::to_string)
     }
 
     #[tokio::test(start_paused = true)]
@@ -224,7 +228,7 @@ mod tests {
         let out = run(&chain, &fakes, 3).await;
 
         assert_eq!(answer(&out), Ok("first"), "the original answered in time");
-        assert_eq!(out.hedges, 0, "the hedge timer never fired");
+        assert_eq!(out.hedge.started, 0, "the hedge timer never fired");
         assert_eq!(
             fakes[1].entered.get(),
             0,
@@ -240,8 +244,8 @@ mod tests {
         let out = run(&chain, &fakes, 3).await;
 
         assert_eq!(answer(&out), Ok("second"), "the hedge answered first");
-        assert_eq!(out.hedges, 1, "exactly one extra call was started");
-        assert!(out.hedge_won, "and it was the hedge that won");
+        assert_eq!(out.hedge.started, 1, "exactly one extra call was started");
+        assert_eq!(out.hedge.won, 1, "and it was the hedge that won");
         assert_eq!(
             started.elapsed(),
             Duration::from_millis(70),
@@ -264,10 +268,10 @@ mod tests {
 
         assert_eq!(answer(&out), Ok("second"), "the retry answered");
         assert_eq!(
-            out.hedges, 0,
+            out.hedge.started, 0,
             "a call pulled in by a failure is a retry, not a hedge — the timer never fired"
         );
-        assert!(!out.hedge_won, "a retry winning is not a hedge winning");
+        assert_eq!(out.hedge.won, 0, "a retry winning is not a hedge winning");
         assert_eq!(
             started.elapsed(),
             Duration::from_millis(15),
@@ -286,8 +290,8 @@ mod tests {
             Err("second".to_string()),
             "the chain is exhausted"
         );
-        assert_eq!(out.attempts, 2);
-        assert_eq!(out.hedges, 0, "both were retries");
+        assert_eq!(out.started, 2);
+        assert_eq!(out.hedge.started, 0, "both were retries");
     }
 
     #[tokio::test(start_paused = true)]
@@ -308,8 +312,8 @@ mod tests {
             Ok("first"),
             "nothing faster was allowed to start"
         );
-        assert_eq!(out.attempts, 2);
-        assert_eq!(out.hedges, 1);
+        assert_eq!(out.started, 2);
+        assert_eq!(out.hedge.started, 1);
         assert_eq!(
             fakes[2].entered.get(),
             0,
@@ -337,7 +341,7 @@ mod tests {
     async fn an_empty_chain_starts_nothing() {
         let out = run(&[], &[], 3).await;
 
-        assert!(matches!(out.result, Err(None)));
-        assert_eq!(out.attempts, 0);
+        assert!(matches!(out.result, Err(Failure::NoUpstream)));
+        assert_eq!(out.started, 0);
     }
 }

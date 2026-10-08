@@ -8,7 +8,7 @@ use prometheus::{
 use crate::{
     observer::{
         MetricsObserver,
-        snapshot::{BUCKET_BOUNDS_MICROS, HedgeCount, Snapshot},
+        snapshot::{BUCKET_BOUNDS_MICROS, HedgeSnapshot, Snapshot},
     },
     upstream::call::CallError,
 };
@@ -84,7 +84,7 @@ impl PrometheusCollector for Collector {
             .collect();
 
         let hedges = self.observer.hedge_snapshots();
-        let per_pair = |count: fn(&HedgeCount) -> u64| {
+        let per_pair = |count: fn(&HedgeSnapshot) -> u64| {
             hedges
                 .iter()
                 .map(|(overtaken, to, hedge)| {

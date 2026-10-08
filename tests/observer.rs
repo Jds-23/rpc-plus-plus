@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Instant};
 use reqwest::StatusCode;
 use rpc_plus_plus::{
     config::{Settings, UpstreamSettings},
-    observer::{MetricsObserver, snapshot::HedgeCount},
+    observer::{MetricsObserver, snapshot::HedgeSnapshot},
     upstream::UpstreamId,
 };
 use serde_json::json;
@@ -154,11 +154,11 @@ async fn a_hedge_and_its_win_land_on_the_overtaken_pair() {
     let res = post(&addr).await;
     assert_eq!(res.status(), 200);
 
-    let slow_to_fast = observer.hedge_count(&ids[0], &ids[1]).unwrap();
-    assert_eq!(slow_to_fast, HedgeCount { started: 1, won: 1 });
+    let slow_to_fast = observer.hedge_snapshot(&ids[0], &ids[1]).unwrap();
+    assert_eq!(slow_to_fast, HedgeSnapshot { started: 1, won: 1 });
 
-    let fast_to_slow = observer.hedge_count(&ids[1], &ids[0]).unwrap();
-    assert_eq!(fast_to_slow, HedgeCount { started: 0, won: 0 });
+    let fast_to_slow = observer.hedge_snapshot(&ids[1], &ids[0]).unwrap();
+    assert_eq!(fast_to_slow, HedgeSnapshot { started: 0, won: 0 });
 
     assert_eq!(observer.snapshot(&ids[1]).unwrap().success, 1);
 }
