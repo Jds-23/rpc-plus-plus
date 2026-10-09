@@ -1,6 +1,7 @@
 use std::{
-    future::{Pending, pending},
-    sync::atomic::AtomicUsize,
+    future::{Pending, Ready, pending, ready},
+    sync::{atomic::AtomicUsize, mpsc},
+    thread,
     time::Duration,
 };
 
@@ -193,6 +194,53 @@ fn only_the_first_caller_leads() {
         Role::Follower { leader },
         "a follower learns whose flight it joined"
     );
+}
+
+#[tokio::test]
+async fn make_runs_outside_the_lock() {
+    let flights = SingleFlight::<bool>::default();
+    let inflight = flights.inflight.clone();
+
+    let (flight, _) = flights.join(key("eth_blockNumber"), Uuid::new_v4(), move || {
+        ready(inflight.try_lock().is_ok())
+    });
+
+    assert!(
+        flight.await,
+        "caller code must not run while the map is locked"
+    );
+}
+
+#[test]
+fn a_panicking_make_does_not_wedge_the_map() {
+    let flights = Arc::new(SingleFlight::<()>::default());
+    let (tx, rx) = mpsc::channel::<()>();
+
+    thread::spawn({
+        let flights = flights.clone();
+        move || {
+            let _tx = tx;
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let (flight, _) =
+                        flights.join(key("eth_blockNumber"), Uuid::new_v4(), || -> Ready<()> {
+                            panic!("make blew up")
+                        });
+                    flight.await;
+                });
+        }
+    });
+
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(1)),
+        Err(mpsc::RecvTimeoutError::Disconnected),
+        "a panic in caller code must unwind, not deadlock on the map lock"
+    );
+    assert!(flights.is_empty(), "the panicked flight leaves no entry");
+    let (_, role) = flights.join(key("eth_blockNumber"), Uuid::new_v4(), pending);
+    assert_eq!(role, Role::Leader, "the key is usable again");
 }
 
 #[test]
