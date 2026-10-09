@@ -9,6 +9,7 @@ use axum::{
 };
 use reqwest::StatusCode;
 use std::{
+    fmt,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -28,6 +29,21 @@ use crate::{
 };
 
 const DEFAULT_MAX_ATTEMPT: u64 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RequestId(Uuid);
+
+impl RequestId {
+    fn random() -> Self {
+        RequestId(Uuid::new_v4())
+    }
+}
+
+impl fmt::Display for RequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 pub struct Pipeline {
@@ -105,7 +121,7 @@ impl Pipeline {
 
 impl Pipeline {
     pub async fn proxy(&self, body: Bytes) -> Response {
-        let request_id = Uuid::new_v4();
+        let request_id = RequestId::random();
         let span = info_span!("proxy", %request_id);
         self.proxy_inner(body).instrument(span).await
     }

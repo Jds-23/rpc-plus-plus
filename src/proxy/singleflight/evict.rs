@@ -7,9 +7,8 @@ use std::{
 };
 
 use futures_util::future::WeakShared;
-use uuid::Uuid;
 
-use super::Run;
+use super::{RequestId, Run};
 use crate::jsonrpc::DedupKey;
 
 pub(super) type Entries<T> = HashMap<DedupKey, Entry<T>>;
@@ -30,7 +29,7 @@ impl FlightIds {
 
 pub(super) struct Entry<T> {
     pub(super) id: FlightId,
-    pub(super) leader: Uuid,
+    pub(super) leader: RequestId,
     /// Weak on purpose: the map alone must never keep a run alive.
     pub(super) flight: WeakShared<Run<T>>,
 }

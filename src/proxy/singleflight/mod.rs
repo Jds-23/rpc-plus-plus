@@ -5,8 +5,8 @@ mod evict;
 use std::sync::Arc;
 
 use futures_util::future::{BoxFuture, FutureExt, Shared};
-use uuid::Uuid;
 
+use super::RequestId;
 use crate::jsonrpc::DedupKey;
 use evict::{Entry, Evict, FlightIds, Inflight, lock};
 
@@ -19,7 +19,7 @@ pub(super) type Flight<T> = Shared<Run<T>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Role {
     Leader,
-    Follower { leader: Uuid },
+    Follower { leader: RequestId },
 }
 
 pub(super) struct SingleFlight<T> {
@@ -44,7 +44,7 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
     pub(super) fn join<F>(
         &self,
         key: DedupKey,
-        me: Uuid,
+        me: RequestId,
         make: impl FnOnce() -> F + Send + 'static,
     ) -> (Flight<T>, Role)
     where

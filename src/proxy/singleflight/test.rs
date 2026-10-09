@@ -58,7 +58,7 @@ fn callers(
 ) -> Vec<JoinHandle<Answer>> {
     (0..n)
         .map(|_| {
-            let (flight, _) = flights.join(key(method), Uuid::new_v4(), {
+            let (flight, _) = flights.join(key(method), RequestId::random(), {
                 let fake = fake.clone();
                 move || fake.run(answer)
             });
@@ -187,12 +187,14 @@ async fn when_everyone_hangs_up_the_run_and_entry_go_with_them() {
 #[test]
 fn only_the_first_caller_leads() {
     let flights = SingleFlight::<()>::default();
-    let leader = Uuid::new_v4();
+    let leader = RequestId::random();
 
     let (_first, first) = flights.join(key("eth_chainId"), leader, pending);
-    let (_second, second) = flights.join(key("eth_chainId"), Uuid::new_v4(), || -> Pending<()> {
-        panic!("a follower must not build a run")
-    });
+    let (_second, second) = flights.join(
+        key("eth_chainId"),
+        RequestId::random(),
+        || -> Pending<()> { panic!("a follower must not build a run") },
+    );
 
     assert_eq!(first, Role::Leader);
     assert_eq!(
@@ -207,7 +209,7 @@ async fn make_runs_outside_the_lock() {
     let flights = SingleFlight::<bool>::default();
     let inflight = flights.inflight.clone();
 
-    let (flight, _) = flights.join(key("eth_blockNumber"), Uuid::new_v4(), move || {
+    let (flight, _) = flights.join(key("eth_blockNumber"), RequestId::random(), move || {
         ready(inflight.try_lock().is_ok())
     });
 
@@ -230,10 +232,11 @@ fn a_panicking_make_does_not_wedge_the_map() {
                 .build()
                 .unwrap()
                 .block_on(async {
-                    let (flight, _) =
-                        flights.join(key("eth_blockNumber"), Uuid::new_v4(), || -> Ready<()> {
-                            panic!("make blew up")
-                        });
+                    let (flight, _) = flights.join(
+                        key("eth_blockNumber"),
+                        RequestId::random(),
+                        || -> Ready<()> { panic!("make blew up") },
+                    );
                     flight.await;
                 });
         }
@@ -245,7 +248,7 @@ fn a_panicking_make_does_not_wedge_the_map() {
         "a panic in caller code must unwind, not deadlock on the map lock"
     );
     assert!(flights.is_empty(), "the panicked flight leaves no entry");
-    let (_, role) = flights.join(key("eth_blockNumber"), Uuid::new_v4(), pending);
+    let (_, role) = flights.join(key("eth_blockNumber"), RequestId::random(), pending);
     assert_eq!(role, Role::Leader, "the key is usable again");
 }
 
@@ -253,8 +256,8 @@ fn a_panicking_make_does_not_wedge_the_map() {
 fn each_key_gets_its_own_leader() {
     let flights = SingleFlight::<()>::default();
 
-    let (_a, a) = flights.join(key("eth_blockNumber"), Uuid::new_v4(), pending);
-    let (_b, b) = flights.join(key("eth_chainId"), Uuid::new_v4(), pending);
+    let (_a, a) = flights.join(key("eth_blockNumber"), RequestId::random(), pending);
+    let (_b, b) = flights.join(key("eth_chainId"), RequestId::random(), pending);
 
     assert_eq!(
         (a, b),
@@ -266,7 +269,7 @@ fn each_key_gets_its_own_leader() {
 #[test]
 fn a_stale_evict_spares_its_replacement() {
     let flights = SingleFlight::<()>::default();
-    let (_live, _) = flights.join(key("eth_blockNumber"), Uuid::new_v4(), pending);
+    let (_live, _) = flights.join(key("eth_blockNumber"), RequestId::random(), pending);
 
     drop(Evict {
         inflight: flights.inflight.clone(),
@@ -279,7 +282,7 @@ fn a_stale_evict_spares_its_replacement() {
         1,
         "a late drop of an older flight evicts nothing"
     );
-    let (_, role) = flights.join(key("eth_blockNumber"), Uuid::new_v4(), pending);
+    let (_, role) = flights.join(key("eth_blockNumber"), RequestId::random(), pending);
     assert!(
         matches!(role, Role::Follower { .. }),
         "the live flight is still joinable"
