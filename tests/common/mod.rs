@@ -9,7 +9,8 @@ use std::{sync::Arc, time::Duration};
 use rpc_plus_plus::{
     app::Application,
     config::{
-        ApplicationSettings, DeciderKind, HedgeSettings, ProxySettings, Settings, UpstreamSettings,
+        ApplicationSettings, DeciderKind, DedupSettings, HedgeSettings, ProxySettings, Settings,
+        UpstreamSettings,
     },
     decider::{Decider, prefer_least_errors::PreferLeastErrors, round_robin::RoundRobin},
     observer::MetricsObserver,
@@ -32,6 +33,7 @@ pub fn test_settings(upstreams: Vec<UpstreamSettings>) -> Settings {
                     enabled: false,
                     after_in_millis: 250,
                 },
+                dedup: DedupSettings { enabled: false },
             },
         },
         legacy_rpc_timeout_in_secs: None,

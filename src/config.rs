@@ -16,11 +16,17 @@ pub struct HedgeSettings {
 }
 
 #[derive(serde::Deserialize)]
+pub struct DedupSettings {
+    pub enabled: bool,
+}
+
+#[derive(serde::Deserialize)]
 pub struct ProxySettings {
     pub max_attempt: u64,
     pub retry_after_in_secs: u64,
     pub rpc_timeout_in_secs: u64,
     pub hedge: HedgeSettings,
+    pub dedup: DedupSettings,
 }
 #[derive(serde::Deserialize)]
 pub struct ApplicationSettings {
@@ -108,6 +114,7 @@ where
         .set_default("application.proxy.rpc_timeout_in_secs", 3)?
         .set_default("application.proxy.hedge.enabled", false)?
         .set_default("application.proxy.hedge.after_in_millis", 250)?
+        .set_default("application.proxy.dedup.enabled", false)?
         .set_default("decider", "ROUND_ROBIN")?
         .add_source(source)
         .build()?
@@ -294,6 +301,15 @@ application:
         assert!(!settings.application.proxy.hedge.enabled);
         assert_eq!(settings.application.proxy.hedge.after_in_millis, 250);
         assert_eq!(settings.upstreams[0].hedge_after_in_millis, None);
+        assert!(!settings.application.proxy.dedup.enabled);
+    }
+
+    #[test]
+    fn the_dedup_is_read_from_the_proxy_block() {
+        let yaml = format!("{MINIMAL}  proxy:\n    dedup:\n      enabled: true\n");
+        let settings = parse(&yaml).expect("the config should load");
+
+        assert!(settings.application.proxy.dedup.enabled);
     }
 
     #[test]
