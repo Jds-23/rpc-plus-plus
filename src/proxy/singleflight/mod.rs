@@ -2,16 +2,13 @@
 
 mod evict;
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::Arc;
 
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use uuid::Uuid;
 
 use crate::jsonrpc::DedupKey;
-use evict::{Entry, Evict, Inflight, lock};
+use evict::{Entry, Evict, FlightIds, Inflight, lock};
 
 pub(super) type Run<T> = BoxFuture<'static, T>;
 
@@ -27,14 +24,14 @@ pub(super) enum Role {
 
 pub(super) struct SingleFlight<T> {
     inflight: Inflight<T>,
-    next_id: AtomicU64,
+    ids: FlightIds,
 }
 
 impl<T> Default for SingleFlight<T> {
     fn default() -> Self {
         Self {
             inflight: Arc::default(),
-            next_id: AtomicU64::new(0),
+            ids: FlightIds::default(),
         }
     }
 }
@@ -66,7 +63,7 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
         }
 
         // None, or a dead entry whose `Evict` has not run yet: start over it.
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = self.ids.next();
         let evict = Evict {
             inflight: self.inflight.clone(),
             key,

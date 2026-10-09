@@ -1,6 +1,9 @@
 use std::{
     future::{Pending, Ready, pending, ready},
-    sync::{atomic::AtomicUsize, mpsc},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
     thread,
     time::Duration,
 };
@@ -268,7 +271,7 @@ fn a_stale_evict_spares_its_replacement() {
     drop(Evict {
         inflight: flights.inflight.clone(),
         key: key("eth_blockNumber"),
-        id: u64::MAX,
+        id: flights.ids.next(),
     });
 
     assert_eq!(
