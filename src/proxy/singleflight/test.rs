@@ -23,7 +23,7 @@ struct Fake {
 }
 
 impl Fake {
-    fn run(self: &Arc<Self>, answer: Answer) -> impl Future<Output = Answer> + 'static {
+    fn run(self: &Arc<Self>, answer: Answer) -> impl Future<Output = Answer> + use<> {
         let fake = self.clone();
         async move {
             fake.entered.fetch_add(1, Ordering::SeqCst);
@@ -55,7 +55,10 @@ fn callers(
 ) -> Vec<JoinHandle<Answer>> {
     (0..n)
         .map(|_| {
-            let (flight, _) = flights.join(key(method), Uuid::new_v4(), || fake.run(answer));
+            let (flight, _) = flights.join(key(method), Uuid::new_v4(), {
+                let fake = fake.clone();
+                move || fake.run(answer)
+            });
             tokio::spawn(flight)
         })
         .collect()

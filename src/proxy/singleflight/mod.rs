@@ -48,7 +48,7 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
         &self,
         key: DedupKey,
         me: Uuid,
-        make: impl FnOnce() -> F,
+        make: impl FnOnce() -> F + Send + 'static,
     ) -> (Flight<T>, Role)
     where
         F: Future<Output = T> + Send + 'static,
@@ -72,10 +72,9 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
             key,
             id,
         };
-        let run = make();
         let flight = async move {
             let _evict = evict;
-            run.await
+            make().await
         }
         .boxed()
         .shared();
