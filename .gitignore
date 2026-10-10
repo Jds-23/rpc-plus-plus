@@ -1,3 +1,5 @@
 /target
 settings.yaml
 .env
+/latency-lab/target
+/latency-lab/solutions/

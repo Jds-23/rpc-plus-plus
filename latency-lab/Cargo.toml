@@ -1,0 +1,12 @@
+[package]
+name = "latency-lab"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone on purpose: the root Cargo.toml has no [workspace] table, so this
+# crate is invisible to the proxy's build, lockfile and CI.
+
+[dependencies]
+arc-swap = "1.9.2"
+tokio = { version = "1.53.1", features = ["full", "test-util"] }
