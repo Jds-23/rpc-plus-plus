@@ -1,3 +1,5 @@
 /target
 settings.yaml
 .env
+/ratelimit-lab/target
+/ratelimit-lab/solutions/
