@@ -130,7 +130,7 @@ impl Pipeline {
         self.proxy_inner(body, request_id).instrument(span).await
     }
 
-    async fn proxy_inner(&self, body: Bytes, request_id: Uuid) -> Response {
+    async fn proxy_inner(&self, body: Bytes, request_id: RequestId) -> Response {
         let received_at = Instant::now();
         info!(event = "request_received", body_bytes = body.len());
         match shape(&body) {
@@ -141,7 +141,7 @@ impl Pipeline {
             Shape::Single => {
                 let reply = match &self.flights {
                     Some(flights) => self.coalesce(flights, request_id, body, received_at).await,
-                    None => self.start(body, received_at).await,
+                    None => self.core.start(body, received_at).await,
                 };
                 reply.into_response()
             }
@@ -152,34 +152,26 @@ impl Pipeline {
         }
     }
 
-    /// The chain is decided here, so a follower never advances the decider.
-    fn start(
-        &self,
-        body: Bytes,
-        received_at: Instant,
-    ) -> impl Future<Output = Reply> + Send + use<> {
-        let chain = self.core.decider.decide(self.core.max_attempt);
-        run(self.core.clone(), chain, body, received_at)
-    }
-
     /// Joins the flight for this request's question, or leads it. A write, an
     /// unknown method or a notification runs on its own.
     async fn coalesce(
         &self,
         flights: &SingleFlight<Reply>,
-        me: Uuid,
+        me: RequestId,
         body: Bytes,
         received_at: Instant,
     ) -> Reply {
         let (Some(key), Some(id)) = (dedup_key(&body), request_id(&body)) else {
-            return self.start(body, received_at).await;
+            return self.core.start(body, received_at).await;
         };
 
         // Instrumented here, so the flight logs under the leader's span
         // whichever caller ends up polling it.
-        let (flight, role) = flights.join(key, me, || {
-            self.start(body.clone(), received_at)
-                .instrument(Span::current())
+        let core = self.core.clone();
+        let leader_body = body.clone();
+        let span = Span::current();
+        let (flight, role) = flights.join(key, me, move || {
+            core.start(leader_body, received_at).instrument(span)
         });
 
         match role {
@@ -192,7 +184,7 @@ impl Pipeline {
                     Some(body) => Reply { body, ..reply },
                     None => {
                         warn!(event = "readdress_failed", leader_request_id = %leader);
-                        self.start(body, received_at).await
+                        self.core.start(body, received_at).await
                     }
                 }
             }
@@ -217,6 +209,16 @@ async fn run(
 }
 
 impl Core {
+    /// The chain is decided here, so a follower never advances the decider.
+    fn start(
+        self: &Arc<Self>,
+        body: Bytes,
+        received_at: Instant,
+    ) -> impl Future<Output = Reply> + Send + use<> {
+        let chain = self.decider.decide(self.max_attempt);
+        run(self.clone(), chain, body, received_at)
+    }
+
     /// One upstream at a time, `retry_after` between them.
     async fn walk<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
         let mut tried: Vec<&UpstreamId> = Vec::with_capacity(chain.len());
