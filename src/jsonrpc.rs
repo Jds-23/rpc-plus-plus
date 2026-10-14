@@ -145,7 +145,6 @@ pub(crate) struct DedupKey(u128);
 /// params are positional. Object keys are sorted: `Map` is a `BTreeMap` without
 /// `preserve_order`. A missing `params` asks the same question as `[]`. The quoted method
 /// string delimits itself, so method and params need no separator.
-#[cfg_attr(not(test), expect(dead_code, reason = "coalesce is the first caller"))]
 pub(crate) fn dedup_key(body: &Bytes) -> Option<DedupKey> {
     let Value::Object(mut request) = serde_json::from_slice(body).ok()? else {
         return None;
@@ -200,7 +199,6 @@ fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<&'de RawValue>, D::
     <&RawValue>::deserialize(d).map(Some)
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "coalesce is the first caller"))]
 pub(crate) fn request_id(body: &Bytes) -> Option<Box<RawValue>> {
     if !matches!(shape(body), Shape::Single) {
         return None;
@@ -211,7 +209,6 @@ pub(crate) fn request_id(body: &Bytes) -> Option<Box<RawValue>> {
 
 /// Swaps in `id` and leaves every other field byte for byte: via `Value`, keys
 /// come back sorted and numbers reformatted.
-#[cfg_attr(not(test), expect(dead_code, reason = "coalesce is the first caller"))]
 pub(crate) fn readdress(body: &Bytes, id: &RawValue) -> Option<Bytes> {
     let mut envelope: BTreeMap<&str, &RawValue> = serde_json::from_slice(body).ok()?;
     envelope.insert("id", id);

@@ -213,7 +213,7 @@ pub fn build_http_client(settings: &ProxySettings) -> Result<Client, reqwest::Er
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::HedgeSettings;
+    use crate::config::{DedupSettings, HedgeSettings};
 
     fn builder_upstream(hedge_after_in_millis: Option<u64>) -> Result<Upstream, BuildError> {
         Upstream::builder()
@@ -233,6 +233,7 @@ mod tests {
                 enabled: true,
                 after_in_millis,
             },
+            dedup: DedupSettings { enabled: false },
         }
     }
 

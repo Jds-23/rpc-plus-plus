@@ -1,6 +1,7 @@
 pub mod attempt;
 mod hedge;
 mod reply;
+mod singleflight;
 
 use axum::{
     body::Bytes,
@@ -8,28 +9,51 @@ use axum::{
 };
 use reqwest::StatusCode;
 use std::{
+    fmt,
     sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::{Instrument, error, info, info_span, warn};
+use tracing::{Instrument, Span, error, info, info_span, warn};
 use uuid::Uuid;
 
 use crate::{
     decider::Decider,
-    jsonrpc::{JSONRPC_INTERNAL_ERROR, Shape, is_write, shape},
+    jsonrpc::{JSONRPC_INTERNAL_ERROR, Shape, dedup_key, is_write, readdress, request_id, shape},
     observer::{Observer, snapshot::HedgeSnapshot},
     proxy::{
         attempt::try_once,
         hedge::{Won, race},
         reply::Reply,
+        singleflight::{Role, SingleFlight},
     },
     upstream::{Upstream, UpstreamId, call::CallError},
 };
 
 const DEFAULT_MAX_ATTEMPT: u64 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RequestId(Uuid);
+
+impl RequestId {
+    fn random() -> Self {
+        RequestId(Uuid::new_v4())
+    }
+}
+
+impl fmt::Display for RequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 pub struct Pipeline {
+    core: Arc<Core>,
+    flights: Option<SingleFlight<Reply>>,
+}
+
+/// The pipeline's state, shareable so a request's run can own it (`'static`).
+struct Core {
     observer: Arc<dyn Observer>,
     decider: Arc<dyn Decider>,
     max_attempt: usize,
@@ -81,28 +105,32 @@ impl Pipeline {
         #[builder(default = DEFAULT_MAX_ATTEMPT)] max_attempt: u64,
         #[builder(default = DEFAULT_RETRY_AFTER)] retry_after: Duration,
         #[builder(default)] dispatch: Dispatch,
+        #[builder(default)] dedup: bool,
     ) -> Result<Self, BuildError> {
         if max_attempt == 0 {
             return Err(BuildError::ZeroMaxAttempt);
         }
         Ok(Self {
-            decider,
-            observer,
-            max_attempt: max_attempt as usize,
-            retry_after,
-            dispatch,
+            core: Arc::new(Core {
+                decider,
+                observer,
+                max_attempt: max_attempt as usize,
+                retry_after,
+                dispatch,
+            }),
+            flights: dedup.then(SingleFlight::default),
         })
     }
 }
 
 impl Pipeline {
     pub async fn proxy(&self, body: Bytes) -> Response {
-        let request_id = Uuid::new_v4();
+        let request_id = RequestId::random();
         let span = info_span!("proxy", %request_id);
-        self.proxy_inner(body).instrument(span).await
+        self.proxy_inner(body, request_id).instrument(span).await
     }
 
-    async fn proxy_inner(&self, body: Bytes) -> Response {
+    async fn proxy_inner(&self, body: Bytes, request_id: RequestId) -> Response {
         let received_at = Instant::now();
         info!(event = "request_received", body_bytes = body.len());
         match shape(&body) {
@@ -111,13 +139,11 @@ impl Pipeline {
                 StatusCode::BAD_REQUEST.into_response()
             }
             Shape::Single => {
-                let chain = self.decider.decide(self.max_attempt);
-                let finished = match (self.dispatch, is_write(&body)) {
-                    (Dispatch::Hedged, false) => self.race(&chain, &body).await,
-                    (Dispatch::Hedged, true) => self.send_once(&chain, &body).await,
-                    (Dispatch::Sequential, _) => self.walk(&chain, &body).await,
+                let reply = match &self.flights {
+                    Some(flights) => self.coalesce(flights, request_id, body, received_at).await,
+                    None => self.core.start(body, received_at).await,
                 };
-                finish(finished, received_at).into_response()
+                reply.into_response()
             }
             Shape::Malformed => {
                 warn!(event = "batch_malformed", body_bytes = body.len());
@@ -125,9 +151,77 @@ impl Pipeline {
             }
         }
     }
+
+    /// Joins the flight for this request's question, or leads it. A write, an
+    /// unknown method or a notification runs on its own.
+    async fn coalesce(
+        &self,
+        flights: &SingleFlight<Reply>,
+        me: RequestId,
+        body: Bytes,
+        received_at: Instant,
+    ) -> Reply {
+        let (Some(key), Some(id)) = (dedup_key(&body), request_id(&body)) else {
+            return self.core.start(body, received_at).await;
+        };
+
+        // Instrumented here, so the flight logs under the leader's span
+        // whichever caller ends up polling it.
+        let core = self.core.clone();
+        let leader_body = body.clone();
+        let span = Span::current();
+        let (flight, role) = flights.join(key, me, move || {
+            core.start(leader_body, received_at).instrument(span)
+        });
+
+        match role {
+            // The upstream answered the leader's own body: its id is already right.
+            Role::Leader => flight.await,
+            Role::Follower { leader } => {
+                info!(event = "request_coalesced", leader_request_id = %leader);
+                let reply = flight.await;
+                match readdress(&reply.body, &id) {
+                    Some(body) => {
+                        self.core.observer.record_coalesced();
+                        Reply { body, ..reply }
+                    }
+                    None => {
+                        warn!(event = "readdress_failed", leader_request_id = %leader);
+                        self.core.start(body, received_at).await
+                    }
+                }
+            }
+        }
+    }
 }
 
-impl Pipeline {
+/// One request, start to finish. Owns everything it touches, so it can run as
+/// a flight that outlives the caller who started it.
+async fn run(
+    core: Arc<Core>,
+    chain: Vec<Arc<Upstream>>,
+    body: Bytes,
+    received_at: Instant,
+) -> Reply {
+    let finished = match (core.dispatch, is_write(&body)) {
+        (Dispatch::Hedged, false) => core.race(&chain, &body).await,
+        (Dispatch::Hedged, true) => core.send_once(&chain, &body).await,
+        (Dispatch::Sequential, _) => core.walk(&chain, &body).await,
+    };
+    finish(finished, received_at)
+}
+
+impl Core {
+    /// The chain is decided here, so a follower never advances the decider.
+    fn start(
+        self: &Arc<Self>,
+        body: Bytes,
+        received_at: Instant,
+    ) -> impl Future<Output = Reply> + Send + use<> {
+        let chain = self.decider.decide(self.max_attempt);
+        run(self.clone(), chain, body, received_at)
+    }
+
     /// One upstream at a time, `retry_after` between them.
     async fn walk<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
         let mut tried: Vec<&UpstreamId> = Vec::with_capacity(chain.len());
@@ -275,4 +369,17 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Reply {
 
 fn elapsed_ms(since: Instant) -> u64 {
     since.elapsed().as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn static_send<F: Future + Send + 'static>(_: F) {}
+
+    // Never called: it compiles only while `run` is `Send + 'static`.
+    #[allow(dead_code)]
+    fn run_can_be_a_flight(core: Arc<Core>) {
+        static_send(run(core, Vec::new(), Bytes::new(), Instant::now()));
+    }
 }

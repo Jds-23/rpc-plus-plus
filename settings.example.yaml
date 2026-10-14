@@ -17,6 +17,9 @@ application:
     # hedge:
     #   enabled: false
     #   after_in_millis: 250
+    # Off by default. When on, concurrent identical reads share one upstream call.
+    # dedup:
+    #   enabled: false
 
 upstreams:
   - label: alchemy
