@@ -7,13 +7,14 @@
 //!
 //! PREDICTION (fill before you write code):
 //! - A fails every call in 2ms. B succeeds every call in 200ms. Which one does
-//!   ex1's `window_mean` rank first?
-//! - 90 calls OK at 100ms, 10 failed at 1ms, the penalty is 3s. Score?
+//!   ex1's `window_mean` rank first? A
+//! - 90 calls OK at 100ms, 10 failed at 1ms, the penalty is 3s. Score? 390ms
 //! - `src/`'s `Snapshot` has `duration_micros_total` and nothing else on time.
 //!   Can this score be computed from it? What field does the impl have to add?
-//!
+//!   No correct score cannot be computed we need to add `failed_micros_total`
 //! RESULT:
-//! -
+//! - All three right: naive mean ranks A (2ms) first; score 390ms; `src/` can't
+//!   compute it, it needs `failed_micros_total`.
 //!
 //! Assert: see the tests. Run them red first and read the messages.
 
@@ -39,7 +40,16 @@ pub fn naive_mean(window: &Snapshot) -> Option<Duration> {
 #[allow(unused_variables)]
 pub fn score(window: &Snapshot) -> Option<Duration> {
     // Every field you need is on `Snapshot`. Check which of them `src/` has.
-    todo!("fill the blank")
+    // todo!("fill the blank")
+    let total = window.total();
+    if total == 0 {
+        return None;
+    }
+    let okay_micros_total = window.duration_micros_total - window.failed_micros_total;
+    let failed_micros_total_with_penalty = window.failed * FAILURE_PENALTY.as_micros() as u64;
+    Some(Duration::from_micros(
+        (okay_micros_total + failed_micros_total_with_penalty) / total,
+    ))
 }
 
 fn fails_fast() -> Snapshot {

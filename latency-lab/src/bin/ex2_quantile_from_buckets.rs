@@ -13,7 +13,11 @@
 //! - Every call took 8s, past the last bound. What can the p50 honestly be?
 //!
 //! RESULT:
-//! -
+//! - No prediction written. By mean A 169ms vs B 150ms, so B first. By p50 A
+//!   17.9ms vs B 175ms, so A first. By p99 A 2.6s vs B 248.5ms. The quantile
+//!   you rank on picks the winner.
+//! - Interpolated p50 is 17.5ms: the "evenly spread inside a bucket" assumption.
+//! - All calls past the last bound: p50 answers 5s, the last bound.
 //!
 //! Assert: see the tests. Run them red first and read the messages.
 
@@ -33,12 +37,30 @@ use std::time::Duration;
 /// - a rank that falls past the last bucket (the overflow) answers the last
 ///   bound — the histogram cannot see further;
 /// - `None` for an empty window.
-#[allow(unused_variables)]
 pub fn quantile(window: &Snapshot, q: f64) -> Option<Duration> {
     // Shape of it: one pass over the buckets carrying the running count and
     // the current bucket's lower bound. Work in `f64` micros for the rank and
     // the interpolation; the bounds are in `BUCKET_BOUNDS_MICROS`.
-    todo!("fill the blank")
+    let total = window.total();
+    if total == 0 {
+        return None;
+    }
+    let rank = q * total as f64;
+
+    let mut running_count = 0.0;
+    let mut lower = 0.0;
+    for (&bucket, &upper) in window.buckets.iter().zip(&BUCKET_BOUNDS_MICROS) {
+        let count_in_bucket = bucket as f64;
+        let upper = upper as f64;
+        if bucket > 0 && running_count + count_in_bucket >= rank {
+            let micros = lower + (upper - lower) * (rank - running_count) / count_in_bucket;
+            return Some(Duration::from_micros(micros as u64));
+        }
+        running_count += count_in_bucket;
+        lower = upper;
+    }
+
+    Some(Duration::from_micros(BUCKET_BOUNDS_MICROS[BUCKET_BOUNDS_MICROS.len() - 1]))
 }
 
 fn tail_heavy() -> Snapshot {

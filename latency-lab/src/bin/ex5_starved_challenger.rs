@@ -10,14 +10,18 @@
 //!
 //! PREDICTION (fill before you write code):
 //! - Head 20ms, rival 30ms, every request to the head. The head degrades to
-//!   2s. After five more ticks, who is head?
+//!   2s. After five more ticks, who is head? still the head
 //! - One request in 20 goes to a challenger. What does that cost, and how many
-//!   ticks until the rival takes over?
+//!   ticks until the rival takes over? The score of challenge even faster cannot change quickly.
 //! - Three upstreams, one probe in 20. How do the two challengers share the
 //!   probes — and what happens to the rotation if you pick by `rand`?
 //!
 //! RESULT:
-//! -
+//! - Without probes `a` stays head at 2s. Right.
+//! - Wrong on speed: `b` took the head the same tick `a` degraded. 5 probes a
+//!   tick already meet `MIN_SAMPLES`. Cost: 5% of traffic.
+//! - Three upstreams: rotation splits probes 25/25. `rand` splits unevenly, so a
+//!   challenger can miss `MIN_SAMPLES` some ticks, and tests go nondeterministic.
 //!
 //! Assert: see the tests. Run them red first and read the messages.
 
@@ -40,9 +44,13 @@ pub const REQUESTS_PER_TICK: u64 = 100;
 /// - probes rotate through the challengers, so each one gets its share;
 /// - deterministic — a function of `request`, no randomness;
 /// - a fleet of one always answers the head.
-#[allow(unused_variables)]
 pub fn route(ranking: &[usize], request: u64) -> usize {
-    todo!("fill the blank")
+    let challengers = &ranking[1..];
+    if challengers.is_empty() || !request.is_multiple_of(PROBE_EVERY) {
+        return ranking[0];
+    }
+    let probe = request / PROBE_EVERY;
+    challengers[(probe % challengers.len() as u64) as usize]
 }
 
 /// GIVEN: today's routing in one line — the head takes everything.
@@ -141,7 +149,11 @@ mod tests {
     fn probes_let_the_faster_rival_take_over() {
         let heads = degrade_scenario(route);
 
-        assert_eq!(&heads[..3], ["a"; 3], "while `a` is the faster one it keeps the head");
+        assert_eq!(
+            &heads[..3],
+            ["a"; 3],
+            "while `a` is the faster one it keeps the head"
+        );
         assert_eq!(
             heads[3], "b",
             "`a` degrades during tick 3, and that same tick's probes already measured `b`"

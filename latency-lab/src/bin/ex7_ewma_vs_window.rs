@@ -16,12 +16,20 @@
 //!   EWMA say? What does ex1's window say?
 //!
 //! RESULT:
-//! -
+//! - No prediction written. After the quiet minute: per-sample 99ms,
+//!   time-decayed 899.8ms.
+//! - One half-life later: exactly 150ms.
+//! - Burst at dt = 0: pure time decay moves nothing; `MIN_WEIGHT` is the fix.
+//! - Before the 900ms call both EWMAs still say 10ms (decay only runs on
+//!   observe); ex1's window says `None`.
 //!
 //! Assert: see the tests. Run them red first and read the messages.
 
 use latency_lab::ms;
-use std::time::Duration;
+use std::{
+    ops::{Div, Sub},
+    time::Duration,
+};
 
 /// A sample never weighs less than this, however close it lands to the last.
 pub const MIN_WEIGHT: f64 = 0.01;
@@ -34,7 +42,10 @@ pub struct PerSample {
 
 impl PerSample {
     pub fn new(alpha: f64) -> Self {
-        PerSample { alpha, micros: None }
+        PerSample {
+            alpha,
+            micros: None,
+        }
     }
 
     pub fn observe(&mut self, sample: Duration) {
@@ -60,7 +71,10 @@ pub struct TimeDecayed {
 
 impl TimeDecayed {
     pub fn new(half_life: Duration) -> Self {
-        TimeDecayed { half_life, state: None }
+        TimeDecayed {
+            half_life,
+            state: None,
+        }
     }
 
     /// Fold in `sample`, observed at `at` (time since any fixed start).
@@ -75,7 +89,17 @@ impl TimeDecayed {
     pub fn observe(&mut self, sample: Duration, at: Duration) {
         // `PerSample::observe` above is the shape; only the weight changes.
         // `f64::exp2` is `2^x`.
-        todo!("fill the blank")
+        let sample = sample.as_micros() as f64;
+
+        self.state = Some(match self.state {
+            None => (sample, at),
+            Some((value, time_of_last_sample)) => {
+                let dt = at.saturating_sub(time_of_last_sample);
+                let ratio = dt.as_secs_f64().div(self.half_life.as_secs_f64());
+                let weight = MIN_WEIGHT.max(1 as f64 - (-ratio).exp2());
+                (sample.sub(value).mul_add(weight, value), at)
+            }
+        })
     }
 
     pub fn value(&self) -> Option<Duration> {

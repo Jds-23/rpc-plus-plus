@@ -18,7 +18,13 @@
 //!   does a request see mid-rebuild? Is there a lock?
 //!
 //! RESULT:
-//! -
+//! - No prediction written. `a` slows at 3.5s, `b` is head by 5.5s, not 4.5s:
+//!   1s calls only record when they finish, so tick 4's window is still mostly
+//!   fast.
+//! - `a` is head again at 11.5s: its 1s calls have to age out of the two-tick
+//!   window, then 20ms beats 30ms × 0.8. `PROMOTION_MARGIN` decides it.
+//! - `decide` is one `ArcSwap` load, refresh is one `store`. No lock, and a
+//!   request never sees half a ranking.
 //!
 //! Assert: see the tests. Run them red first and read the messages.
 
@@ -109,7 +115,38 @@ impl Refresher {
     pub fn refresh(&mut self) {
         // `RankingRefresher::refresh` in `src/` is this function with an error
         // rate where the latency goes. Read it, close it, write this one.
-        todo!("fill the blank")
+        // todo!("fill the blank")
+        let current = self.snapshot();
+        let baseline = self.baseline.front().expect("seeded in new");
+        let previous = self.decider.ranking.load_full();
+        if let Some(head) = previous.first() {
+            let mut keyed: Vec<(Arc<Fake>, (bool, Option<Duration>))> = previous
+                .iter()
+                .map(|upstream| {
+                    let window = current[upstream.name].diff(&baseline[upstream.name]);
+                    let scored = if window.total() < MIN_SAMPLES {
+                        None
+                    } else {
+                        score(&window)
+                    };
+                    let scored = if upstream.name == head.name {
+                        scored.map(|d| d.mul_f64(PROMOTION_MARGIN))
+                    } else {
+                        scored
+                    };
+                    (upstream.clone(), (scored.is_none(), scored))
+                })
+                .collect();
+            keyed.sort_by_key(|(_, key)| *key);
+
+            self.decider.ranking.store(Arc::new(
+                keyed.into_iter().map(|(upstream, _)| upstream).collect(),
+            ));
+            self.baseline.push_back(current);
+            if self.baseline.len() > self.window_ticks {
+                self.baseline.pop_front();
+            }
+        }
     }
 
     /// GIVEN: the ticker, as in `src/`. The first tick fires at once and is
@@ -196,7 +233,11 @@ mod tests {
     fn by_hand(window_ticks: usize) -> (Refresher, Arc<LeastLatency>, Vec<Arc<Fake>>) {
         let fleet = fleet(&[("a", 0), ("b", 0)]);
         let decider = LeastLatency::new(&fleet);
-        (Refresher::new(decider.clone(), fleet.clone(), window_ticks), decider, fleet)
+        (
+            Refresher::new(decider.clone(), fleet.clone(), window_ticks),
+            decider,
+            fleet,
+        )
     }
 
     #[test]
@@ -238,7 +279,10 @@ mod tests {
         for _ in 0..10 {
             fleet[0].stats.record_n(10, ms(10), Outcome::Ok);
             refresher.refresh();
-            assert!(refresher.baseline.len() <= 3, "the deque grew past the window");
+            assert!(
+                refresher.baseline.len() <= 3,
+                "the deque grew past the window"
+            );
         }
         assert_eq!(refresher.baseline.len(), 3);
     }

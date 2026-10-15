@@ -15,7 +15,9 @@
 //! - If the margin can't fix that, what can? (Not in `rank`.)
 //!
 //! RESULT:
-//! -
+//! - No prediction written. Jitter: 10 swaps without margin, 0 with.
+//! - Herd: 10 of 10 ticks swap either way. The margin fixes noise, not load
+//!   feedback: idle 50ms beats loaded 100ms × 0.8 every tick.
 //!
 //! Assert: see the tests. Run them red first and read the messages.
 
@@ -39,7 +41,19 @@ pub const PROMOTION_MARGIN: f64 = 0.8;
 pub fn rank(previous: &[usize], scores: &[Option<Duration>]) -> Vec<usize> {
     // `rank_no_margin` below is most of it. `SortKey` in
     // `src/decider/prefer_least_errors/refresher.rs` is the rest.
-    todo!("fill the blank")
+    // todo!("fill the blank")
+    // for (index, score) in previous.iter().zip(scores) {}
+    let head = previous[0];
+    let mut next = previous.to_vec();
+    next.sort_by_key(|&i| {
+        let score = if i == head {
+            scores[i].map(|d| d.mul_f64(PROMOTION_MARGIN))
+        } else {
+            scores[i]
+        };
+        (score.is_none(), score)
+    });
+    next
 }
 
 /// GIVEN: the same sort with no margin, for comparison.
@@ -139,7 +153,10 @@ mod tests {
     #[test]
     fn ties_keep_their_order() {
         assert_eq!(rank(&[1, 0], &[Some(ms(80)), Some(ms(80))]), [1, 0]);
-        assert_eq!(rank(&[2, 0, 1], &[Some(ms(9)), Some(ms(9)), Some(ms(9))]), [2, 0, 1]);
+        assert_eq!(
+            rank(&[2, 0, 1], &[Some(ms(9)), Some(ms(9)), Some(ms(9))]),
+            [2, 0, 1]
+        );
     }
 
     #[test]

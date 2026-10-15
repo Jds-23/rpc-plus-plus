@@ -10,14 +10,18 @@
 //!
 //! PREDICTION (fill before you write code):
 //! - Primary takes 500ms, the hedge fires at 100ms to a 50ms backup. Twenty
-//!   requests. How many records does the primary get under `Fake::attempt`?
+//!   requests. How many records does the primary get under `Fake::attempt`? None
 //! - Same race, recording on drop. What duration lands for each dropped leg —
-//!   and is it the primary's real latency?
+//!   and is it the primary's real latency? It records when primary is dropped . no it's not primary's real latency
 //! - A call completes normally. How do you make sure the drop path does not
-//!   record it a second time?
+//!   record it a second time? Not sure
 //!
 //! RESULT:
-//! -
+//! - Primary records under `Fake::attempt`: none. Right.
+//! - Each dropped leg records 150ms (hedge at 100 + backup's 50): a lower bound,
+//!   not the real 500ms. Right.
+//! - Double record: didn't know. An `armed` flag, disarmed on completion; my
+//!   guard's `record()` disarms itself, so `Drop` sees it unarmed.
 //!
 //! Assert: see the tests. Run them red first and read the messages.
 
@@ -27,6 +31,30 @@ use std::future::Future;
 use std::time::Duration;
 #[allow(unused_imports)]
 use tokio::time::Instant;
+
+struct AbandonedGuard<'a> {
+    started: Instant,
+    stats: &'a Stats,
+    armed: bool,
+}
+
+impl AbandonedGuard<'_> {
+    fn record(&mut self, outcome: Outcome) {
+        if self.armed {
+            self.stats.record(self.started.elapsed(), outcome);
+            self.armed = false;
+        }
+    }
+}
+
+impl Drop for AbandonedGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.stats
+                .record(self.started.elapsed(), Outcome::Abandoned);
+        }
+    }
+}
 
 /// `Fake::attempt`, but every call records exactly once — including the ones
 /// that are dropped before they answer.
@@ -38,11 +66,25 @@ use tokio::time::Instant;
 ///
 /// Shape of it: an RAII guard that holds `&upstream.stats` and the start
 /// instant, records `Abandoned` in its `Drop`, and is disarmed on completion.
+///
+///
 #[allow(unused_variables)]
 pub async fn guarded_attempt(upstream: &Fake) -> Result<&'static str, &'static str> {
     // The guard is yours to define, right here below the function. `Fake::attempt`
     // in `src/lib.rs` is the unguarded version to start from.
-    todo!("fill the blank")
+    // todo!("fill the blank")
+    let mut guard = AbandonedGuard {
+        armed: true,
+        stats: &upstream.stats,
+        started: Instant::now(),
+    };
+    let result = upstream.call().await;
+    let outcome = match &result {
+        Ok(_) => Outcome::Ok,
+        Err(_) => Outcome::Failed,
+    };
+    guard.record(outcome);
+    result
 }
 
 /// GIVEN: the hedger's race in miniature. Whichever leg answers first wins;
@@ -110,7 +152,11 @@ mod tests {
             naive_request(&primary, &backup).await;
         }
 
-        assert_eq!(primary.entered(), 20, "GIVEN: the primary was called 20 times");
+        assert_eq!(
+            primary.entered(),
+            20,
+            "GIVEN: the primary was called 20 times"
+        );
         assert_eq!(
             primary.stats.snapshot().total(),
             0,
@@ -177,7 +223,10 @@ mod tests {
 
         assert!(cut.is_err(), "GIVEN: the deadline fired");
         let seen = upstream.stats.snapshot();
-        assert_eq!(seen.abandoned, 1, "`timeout` drops the call — same path as a hedge loser");
+        assert_eq!(
+            seen.abandoned, 1,
+            "`timeout` drops the call — same path as a hedge loser"
+        );
         assert_eq!(seen.lifetime_mean(), Some(latency_lab::TIMEOUT));
     }
 }

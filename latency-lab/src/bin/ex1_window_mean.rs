@@ -8,12 +8,16 @@
 //!
 //! PREDICTION (fill before you write code):
 //! - 1000 calls at 10ms, then 50 at 800ms. Lifetime mean? Window mean over
-//!   just the last 50?
+//!   just the last 50? 48 & 800
 //! - A window with zero calls. What should the mean be — and what goes wrong
-//!   if it is `Duration::ZERO`?
+//!   if it is `Duration::ZERO`? Not sure what mean will be; but if it is zero all would
+//!   route through that.
+//!
 //!
 //! RESULT:
-//! -
+//! - Predicted 48ms & 800ms: right (lifetime 47.6ms, window 800ms).
+//! - Zero-call window answers `None`, not `ZERO`. As guessed, ZERO would rank
+//!   the idle upstream fastest of all and route everything to it.
 //!
 //! Assert: see the tests. Run them red first and read the messages.
 
@@ -30,7 +34,8 @@ use std::time::Duration;
 pub fn window_mean(current: &Snapshot, baseline: &Snapshot) -> Option<Duration> {
     // `Snapshot::diff` gives you the window. What you divide by what is the
     // drill.
-    todo!("fill the blank")
+    // todo!("fill the blank")
+    current.diff(baseline).lifetime_mean()
 }
 
 fn main() {
