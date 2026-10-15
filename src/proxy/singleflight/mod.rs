@@ -1,15 +1,12 @@
 mod evict;
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::Arc;
 
 use futures_util::future::{BoxFuture, FutureExt, Shared};
-use uuid::Uuid;
 
+use super::RequestId;
 use crate::jsonrpc::DedupKey;
-use evict::{Entry, Evict, Inflight, lock};
+use evict::{Entry, Evict, FlightIds, Inflight, lock};
 
 pub(super) type Run<T> = BoxFuture<'static, T>;
 
@@ -20,19 +17,19 @@ pub(super) type Flight<T> = Shared<Run<T>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Role {
     Leader,
-    Follower { leader: Uuid },
+    Follower { leader: RequestId },
 }
 
 pub(super) struct SingleFlight<T> {
     inflight: Inflight<T>,
-    next_id: AtomicU64,
+    ids: FlightIds,
 }
 
 impl<T> Default for SingleFlight<T> {
     fn default() -> Self {
         Self {
             inflight: Arc::default(),
-            next_id: AtomicU64::new(0),
+            ids: FlightIds::default(),
         }
     }
 }
@@ -45,8 +42,8 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
     pub(super) fn join<F>(
         &self,
         key: DedupKey,
-        me: Uuid,
-        make: impl FnOnce() -> F,
+        me: RequestId,
+        make: impl FnOnce() -> F + Send + 'static,
     ) -> (Flight<T>, Role)
     where
         F: Future<Output = T> + Send + 'static,
@@ -64,16 +61,15 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
         }
 
         // None, or a dead entry whose `Evict` has not run yet: start over it.
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = self.ids.next();
         let evict = Evict {
             inflight: self.inflight.clone(),
             key,
             id,
         };
-        let run = make();
         let flight = async move {
             let _evict = evict;
-            run.await
+            make().await
         }
         .boxed()
         .shared();
