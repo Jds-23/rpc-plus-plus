@@ -109,6 +109,9 @@ Old config files still load — see the deprecation note above. `NoopObserver` a
 ## Docs
 
 - [docs/spec.md](docs/spec.md) — product requirements, full feature set
+- [docs/roadmap.md](docs/roadmap.md) — what lands next
+- [docs/erpc-comparison.md](docs/erpc-comparison.md) — feature comparison with eRPC
+- [docs/erpc-gap-priorities.md](docs/erpc-gap-priorities.md) — eRPC gaps ranked by value for effort
 - [docs/design/v0.1.md](docs/design/v0.1.md) — v0.1 design, log schema, known bugs
 - [docs/design/v0.2.1-DECIDER.md](docs/design/v0.2.1-DECIDER.md) — the windowed error-rate decider
 - [docs/design/v0.3-HEDGING.md](docs/design/v0.3-HEDGING.md) — hedged requests
