@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
+use futures_util::future::join_all;
 use reqwest::StatusCode;
 use rpc_plus_plus::{
     config::{Settings, UpstreamSettings},
@@ -161,4 +162,37 @@ async fn a_hedge_and_its_win_land_on_the_overtaken_pair() {
     assert_eq!(fast_to_slow, HedgeSnapshot { started: 0, won: 0 });
 
     assert_eq!(observer.snapshot(&ids[1]).unwrap().success, 1);
+}
+
+#[tokio::test]
+async fn every_follower_of_a_flight_is_counted_coalesced() {
+    let slow = mock_rpc_server::slow("0x10", std::time::Duration::from_millis(300)).await;
+    let mut settings = settings(vec![rpc("slow", slow.uri())]);
+    settings.application.proxy.dedup.enabled = true;
+    let (_, observer) = observer(&["slow"]);
+    let addr = spawn_app_with_observer(settings, observer.clone()).await;
+
+    let client = reqwest::Client::new();
+    join_all((0..5).map(|id| {
+        client
+            .post(format!("{addr}/rpc"))
+            .json(&json!({"jsonrpc":"2.0","id":id,"method":"eth_blockNumber","params":[]}))
+            .send()
+    }))
+    .await;
+
+    assert_eq!(slow.received_requests().await.unwrap().len(), 1);
+    assert_eq!(observer.coalesced(), 4, "the leader made the call");
+}
+
+#[tokio::test]
+async fn nothing_is_coalesced_with_dedup_off() {
+    let slow = mock_rpc_server::slow("0x10", std::time::Duration::from_millis(300)).await;
+    let (_, observer) = observer(&["slow"]);
+    let addr =
+        spawn_app_with_observer(settings(vec![rpc("slow", slow.uri())]), observer.clone()).await;
+
+    join_all((0..3).map(|_| post(&addr))).await;
+
+    assert_eq!(observer.coalesced(), 0);
 }

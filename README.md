@@ -11,17 +11,17 @@ Apps hardcode a single RPC URL. When that provider rate-limits, slows down, or g
 - **Provider outages do not reach users.** If at least one upstream is healthy, the caller should not see the failure.
 - **One request is debuggable from logs alone.** Follow a single `request_id` across every upstream attempt and see which provider failed, with what status, and how long it took.
 
-## Status — v0.1
+## Status — v0.4
 
-Round-robin across upstreams with serial retry failover. Logs are the only observability surface.
+Round-robin or error-rate-ranked selection across upstreams, with retry failover. Two opt-in layers on top: hedging races a second upstream when the first is slow, and dedup coalesces concurrent identical reads into one upstream call.
 
 | | |
 |---|---|
 | `POST /rpc` | Raw JSON-RPC passthrough. Batches rejected with HTTP 400 |
 | `GET /healthz` | Liveness |
-| `GET /metrics` | Prometheus exposition: attempts by outcome, attempt duration |
+| `GET /metrics` | Prometheus exposition: attempts by outcome, attempt duration, hedges, hedge wins, coalesced requests |
 
-Deliberately not here yet: caching, least-latency routing, hedging, in-flight dedup, auth, multichain. Known gaps are tracked in [docs/design/v0.1.md](docs/design/v0.1.md#known-bugs) — read it before deploying this anywhere real.
+Deliberately not here yet: caching, least-latency routing, auth, multichain. Each release's known gaps are listed in its design doc under [docs/design/](docs/design/) — read them before deploying this anywhere real.
 
 ## Run
 
@@ -41,10 +41,16 @@ application:
     max_attempt: 3            # default 3
     retry_after_in_secs: 1    # default 1
     rpc_timeout_in_secs: 3    # default 3
+    hedge:
+      enabled: false          # default false
+      after_in_millis: 250    # default 250
+    dedup:
+      enabled: false          # default false
 
 upstreams:                    # required, at least one
   - label: alchemy
     url: https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_KEY}
+    hedge_after_in_millis: 400  # optional, overrides hedge.after_in_millis
   - label: drpc
     url: https://lb.drpc.org/ogrpc?network=ethereum&dkey=${DRPC_KEY}
 
@@ -54,6 +60,10 @@ decider: ROUND_ROBIN          # default ROUND_ROBIN, or PREFER_LEAST_ERRORS
 Only `application.port` and `upstreams` are required. Upstreams are referred to by `label` everywhere in the logs; the URL is never logged.
 
 `decider` picks the selection strategy. `ROUND_ROBIN` hands out every upstream in turn. `PREFER_LEAST_ERRORS` ranks them by error rate over a rolling window and re-ranks on a 15s timer, logging a `ranking_rebuilt` line each time. An unrecognised value is rejected while the config is read.
+
+`hedge` races the next upstream in the chain once the current one has gone `after_in_millis` without answering, and takes whichever answers first. Writes are never hedged. `after_in_millis` and every per-upstream override must be at least 1. Hedges show up as `rpc_hedges_total` and `rpc_hedge_wins_total`, labelled by the overtaken `upstream` and the one hedged `to`. Design: [v0.3-HEDGING.md](docs/design/v0.3-HEDGING.md).
+
+`dedup` makes concurrent requests with the same `method` and `params` share one upstream call. Each caller still gets its own `id` back. Only idempotent reads are coalesced; writes, notifications and unknown methods always run on their own. It is not a cache: a request arriving after the shared call finished makes a fresh one. Hedging and dedup compose. Every request answered by another's call counts towards `rpc_requests_coalesced_total`, and logs a `request_coalesced` line carrying the `leader_request_id` whose upstream attempts it shared. Design: [v0.4-DEDUP.md](docs/design/v0.4-DEDUP.md).
 
 The pre-rename spellings still load. `rpcs:` and `rpc_url:` are accepted silently as aliases for `upstreams:` and `url:`; a top-level `rpc_timeout_in_secs` still wins over the one under `application.proxy` and logs one `config_key_deprecated` warn at startup.
 
@@ -70,9 +80,11 @@ src/
   main.rs        init, load, build, run, and the signal watcher
   app.rs         composition root — Application, build_decider, build
   config.rs      settings.yaml -> Settings: env expansion, validation
+  jsonrpc.rs     the wire format: request shape, write detection, dedup key, re-addressing
   telemetry.rs   tracing subscriber
   http/          the axum surface — build_router plus one handler per route
-  proxy/         Pipeline: the retry loop; attempt.rs one call, jsonrpc.rs the wire format
+  proxy/         Pipeline: the retry loop; attempt.rs one call, hedge.rs the race,
+                 reply.rs the shared answer, singleflight/ the in-flight dedup map
   upstream/      Upstream, UpstreamId, build_all; call.rs holds the per-call vocabulary
   decider/       the Decider trait, round_robin.rs, prefer_least_errors/
   observer/      the Observer seam and MetricsObserver; snapshot.rs values, prometheus.rs exposition
@@ -97,9 +109,11 @@ Old config files still load — see the deprecation note above. `NoopObserver` a
 ## Docs
 
 - [docs/spec.md](docs/spec.md) — product requirements, full feature set
-- [docs/design/v0.1.md](docs/design/v0.1.md) — v0.1 design, log schema, known bugs
-- [docs/design/v0.2.1-DECIDER.md](docs/design/v0.2.1-DECIDER.md) — the windowed error-rate decider
 - [docs/roadmap.md](docs/roadmap.md) — what lands next
 - [docs/erpc-comparison.md](docs/erpc-comparison.md) — feature comparison with eRPC
 - [docs/erpc-gap-priorities.md](docs/erpc-gap-priorities.md) — eRPC gaps ranked by value for effort
+- [docs/design/v0.1.md](docs/design/v0.1.md) — v0.1 design, log schema, known bugs
+- [docs/design/v0.2.1-DECIDER.md](docs/design/v0.2.1-DECIDER.md) — the windowed error-rate decider
+- [docs/design/v0.3-HEDGING.md](docs/design/v0.3-HEDGING.md) — hedged requests
+- [docs/design/v0.4-DEDUP.md](docs/design/v0.4-DEDUP.md) — in-flight dedup
 - [docs/commit-style.md](docs/commit-style.md) — commit convention

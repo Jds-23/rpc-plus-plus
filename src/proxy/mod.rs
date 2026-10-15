@@ -181,7 +181,10 @@ impl Pipeline {
                 info!(event = "request_coalesced", leader_request_id = %leader);
                 let reply = flight.await;
                 match readdress(&reply.body, &id) {
-                    Some(body) => Reply { body, ..reply },
+                    Some(body) => {
+                        self.core.observer.record_coalesced();
+                        Reply { body, ..reply }
+                    }
                     None => {
                         warn!(event = "readdress_failed", leader_request_id = %leader);
                         self.core.start(body, received_at).await
