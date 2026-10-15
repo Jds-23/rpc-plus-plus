@@ -371,3 +371,64 @@ async fn dedup_off_sends_every_request() {
         "off by default, and off means today's path"
     );
 }
+
+#[tokio::test]
+async fn a_follower_whose_reply_cannot_be_readdressed_runs_alone() {
+    let upstream = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_string("[]")
+                .set_delay(UPSTREAM_DELAY),
+        )
+        .mount(&upstream)
+        .await;
+    let mut settings = test_settings(vec![rpc("one", upstream.uri())]);
+    settings.application.proxy.dedup.enabled = true;
+    let addr = spawn_app(settings).await;
+
+    let client = reqwest::Client::new();
+    let bodies = join_all((0..3).map(|id| {
+        let client = client.clone();
+        let addr = addr.clone();
+        async move {
+            let res = client
+                .post(format!("{addr}/rpc"))
+                .json(&block_number(json!(id)))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(res.status(), 200);
+            res.text().await.unwrap()
+        }
+    }))
+    .await;
+
+    assert!(bodies.iter().all(|body| body == "[]"));
+    assert_eq!(
+        hits(&upstream).await,
+        3,
+        "the leader's call plus one of its own per follower"
+    );
+}
+
+#[tokio::test]
+async fn dedup_and_hedging_compose() {
+    let slow = mock_rpc_server::slow("0xa", Duration::from_millis(500)).await;
+    let fast = mock_rpc_server::ok("0xb").await;
+    let mut settings = test_settings(vec![rpc("one", slow.uri()), rpc("two", fast.uri())]);
+    settings.application.proxy.hedge.enabled = true;
+    settings.application.proxy.hedge.after_in_millis = 50;
+    settings.application.proxy.dedup.enabled = true;
+    let addr = spawn_app(settings).await;
+
+    let ids: Vec<Value> = (0..5).map(Value::from).collect();
+    let answers = all_at_once(&addr, ids.iter().cloned().map(block_number).collect()).await;
+
+    for (answer, id) in answers.iter().zip(&ids) {
+        assert_eq!(&answer["id"], id);
+        assert_eq!(answer["result"], "0xb", "the flight's hedge answered first");
+    }
+    assert_eq!(hits(&slow).await, 1, "one flight, one first call");
+    assert_eq!(hits(&fast).await, 1, "and one hedge");
+}

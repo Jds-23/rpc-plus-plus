@@ -23,6 +23,8 @@ const HEDGES_HELP: &str =
 const HEDGE_WINS_NAME: &str = "rpc_hedge_wins_total";
 const HEDGE_WINS_HELP: &str =
     "Hedge calls that overtook this upstream and answered first, by the upstream hedged to";
+const COALESCED_NAME: &str = "rpc_requests_coalesced_total";
+const COALESCED_HELP: &str = "Requests answered by another request's flight";
 const SUCCESS: &str = "success";
 
 const MICROS_PER_SECOND: f64 = 1_000_000.0;
@@ -33,6 +35,7 @@ pub struct Collector {
     attempts_duration_desc: Desc,
     hedges_desc: Desc,
     hedge_wins_desc: Desc,
+    coalesced_desc: Desc,
 }
 
 impl Collector {
@@ -51,12 +54,19 @@ impl Collector {
         )?;
         let hedges_desc = pair_desc(HEDGES_NAME, HEDGES_HELP)?;
         let hedge_wins_desc = pair_desc(HEDGE_WINS_NAME, HEDGE_WINS_HELP)?;
+        let coalesced_desc = Desc::new(
+            COALESCED_NAME.to_string(),
+            COALESCED_HELP.to_string(),
+            vec![],
+            HashMap::new(),
+        )?;
         Ok(Collector {
             observer,
             attempts_desc,
             attempts_duration_desc,
             hedges_desc,
             hedge_wins_desc,
+            coalesced_desc,
         })
     }
 }
@@ -113,6 +123,12 @@ impl PrometheusCollector for Collector {
                 MetricType::COUNTER,
                 per_pair(|hedge| hedge.won),
             ),
+            family(
+                COALESCED_NAME,
+                COALESCED_HELP,
+                MetricType::COUNTER,
+                vec![unlabelled_counter_metric(self.observer.coalesced())],
+            ),
         ]
     }
     fn desc(&self) -> Vec<&Desc> {
@@ -121,6 +137,7 @@ impl PrometheusCollector for Collector {
             &self.attempts_duration_desc,
             &self.hedges_desc,
             &self.hedge_wins_desc,
+            &self.coalesced_desc,
         ]
     }
 }
@@ -210,6 +227,17 @@ fn pair_counter_metric(upstream: &str, to: &str, value: u64) -> Metric {
     }
 }
 
+fn unlabelled_counter_metric(value: u64) -> Metric {
+    Metric {
+        counter: Counter {
+            value: Some(value as f64),
+            ..Default::default()
+        }
+        .into(),
+        ..Default::default()
+    }
+}
+
 fn counter_metric(upstream: &str, outcome: &str, value: u64) -> Metric {
     Metric {
         label: vec![label("outcome", outcome), label("upstream", upstream)],
@@ -238,8 +266,8 @@ mod tests {
         observer::{
             MetricsObserver, Observer,
             prometheus::{
-                ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, Collector, HEDGE_WINS_NAME, HEDGES_NAME,
-                cumulative,
+                ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, COALESCED_NAME, Collector, HEDGE_WINS_NAME,
+                HEDGES_NAME, cumulative,
             },
         },
         upstream::{
@@ -389,6 +417,37 @@ rpc_hedge_wins_total{upstream="zulu",to="alpha"} 0
         assert_eq!(encode(&families, HEDGE_WINS_NAME), EXPECTED_HEDGE_WINS);
     }
 
+    const EXPECTED_COALESCED: &str = r#"# HELP rpc_requests_coalesced_total Requests answered by another request's flight
+# TYPE rpc_requests_coalesced_total counter
+rpc_requests_coalesced_total 2
+"#;
+
+    #[test]
+    fn coalesced_requests_are_one_unlabelled_counter() {
+        let alpha = UpstreamId::new("alpha");
+        let observer = Arc::new(MetricsObserver::new(vec![alpha]));
+        let collector = Collector::new(observer.clone()).unwrap();
+
+        observer.record_coalesced();
+        observer.record_coalesced();
+
+        assert_eq!(
+            encode(&collector.collect(), COALESCED_NAME),
+            EXPECTED_COALESCED
+        );
+    }
+
+    #[test]
+    fn coalesced_reads_zero_before_any_flight() {
+        let alpha = UpstreamId::new("alpha");
+        let observer = Arc::new(MetricsObserver::new(vec![alpha]));
+        let collector = Collector::new(observer).unwrap();
+
+        assert!(
+            encode(&collector.collect(), COALESCED_NAME).contains("rpc_requests_coalesced_total 0")
+        );
+    }
+
     #[test]
     fn test_desc_advertises_every_family() {
         let observer = Arc::new(MetricsObserver::new(vec![]));
@@ -406,7 +465,8 @@ rpc_hedge_wins_total{upstream="zulu",to="alpha"} 0
                 ATTEMPTS_NAME,
                 ATTEMPTS_DURATION_NAME,
                 HEDGES_NAME,
-                HEDGE_WINS_NAME
+                HEDGE_WINS_NAME,
+                COALESCED_NAME
             ]
         );
     }

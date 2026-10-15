@@ -3,7 +3,10 @@ pub mod snapshot;
 
 use std::{
     collections::HashMap,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use tracing::warn;
@@ -24,6 +27,7 @@ pub trait Observer: Send + Sync + 'static {
     fn record_hedge(&self, overtaken: &UpstreamId, to: &UpstreamId);
     /// The hedge from `overtaken` to `to` answered first.
     fn record_hedge_win(&self, overtaken: &UpstreamId, to: &UpstreamId);
+    fn record_coalesced(&self);
 }
 
 pub struct MetricsObserver {
@@ -31,6 +35,7 @@ pub struct MetricsObserver {
     /// Keyed `(overtaken, to)`. Every ordered pair exists up front, so recording
     /// never takes a lock.
     hedges: HashMap<(UpstreamId, UpstreamId), Arc<HedgeStats>>,
+    coalesced: AtomicU64,
 }
 
 impl MetricsObserver {
@@ -48,7 +53,11 @@ impl MetricsObserver {
                 );
             }
         }
-        MetricsObserver { stats, hedges }
+        MetricsObserver {
+            stats,
+            hedges,
+            coalesced: AtomicU64::new(0),
+        }
     }
 
     /// `None` for an upstream this observer was not built with.
@@ -93,6 +102,10 @@ impl MetricsObserver {
         stat
     }
 
+    pub fn coalesced(&self) -> u64 {
+        self.coalesced.load(Ordering::Relaxed)
+    }
+
     pub fn snapshot_map(&self) -> HashMap<UpstreamId, Snapshot> {
         let mut out = HashMap::new();
         for (upstream_id, stat) in self.stats.iter() {
@@ -113,6 +126,10 @@ impl Observer for MetricsObserver {
         if let Some(stat) = self.hedge_stats(overtaken, to) {
             stat.won.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    fn record_coalesced(&self) {
+        self.coalesced.fetch_add(1, Ordering::Relaxed);
     }
 
     fn record(&self, upstream: &UpstreamId, record: CallRecord<'_>) {
@@ -348,6 +365,16 @@ mod tests {
             "the reverse pair is its own series"
         );
         assert_eq!(observer.hedge_snapshot(&one, &one), None, "no self pair");
+    }
+
+    #[test]
+    fn coalesced_requests_are_counted() {
+        let observer = create_observer();
+
+        observer.record_coalesced();
+        observer.record_coalesced();
+
+        assert_eq!(observer.coalesced(), 2);
     }
 
     #[test]
