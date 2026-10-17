@@ -152,6 +152,14 @@ impl Observer for MetricsObserver {
         stat.duration_micros_total
             .fetch_add(duration_micros, Ordering::Relaxed);
 
+        if let Err(err) = &record.outcome
+            && err.is_retryable()
+        {
+            stat.retryable_failures.fetch_add(1, Ordering::Relaxed);
+            stat.retryable_failures_micros_total
+                .fetch_add(duration_micros, Ordering::Relaxed);
+        }
+
         // The slot of the first bound this duration is `le`. Anything past the
         // last bound gets no slot — `+Inf` covers it, derived at render.
         let bucket_idx = BUCKET_BOUNDS_MICROS.partition_point(|&b| b < duration_micros);
@@ -343,6 +351,45 @@ mod tests {
         assert_eq!(stats.error_status.load(Ordering::Relaxed), 1);
         assert_eq!(stats.read_failed.load(Ordering::Relaxed), 1);
         assert_eq!(stats.unreachable.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_client_error_is_not_a_retryable_failure() {
+        let observer = create_observer();
+        let upstream_id = UpstreamId::new("upstream-1");
+
+        let records = [
+            (Ok(StatusCode::OK), 10_000),
+            (
+                Err(&CallError::ErrorStatus {
+                    http_status: StatusCode::INTERNAL_SERVER_ERROR,
+                }),
+                2_000,
+            ),
+            (
+                Err(&CallError::ErrorStatus {
+                    http_status: StatusCode::BAD_REQUEST,
+                }),
+                3_000,
+            ),
+        ];
+        for (outcome, micros) in records {
+            observer.record(
+                &upstream_id,
+                CallRecord {
+                    outcome,
+                    duration: Duration::from_micros(micros),
+                },
+            );
+        }
+
+        let snapshot = observer.snapshot(&upstream_id).unwrap();
+        assert_eq!(
+            snapshot.retryable_failures, 1,
+            "the 500 only; a 400 is the caller's"
+        );
+        assert_eq!(snapshot.retryable_failures_micros_total, 2_000);
+        assert_eq!(snapshot.duration_micros_total, 15_000);
     }
 
     #[test]
