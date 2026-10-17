@@ -140,8 +140,7 @@ async fn a_json_rpc_error_on_a_200_is_not_a_success() {
 }
 
 /// Both counters land on the pair: the slow upstream that ran past its
-/// `hedge_after`, and the one the hedge went to. The overtaken call is dropped
-/// and records no outcome of its own.
+/// `hedge_after`, and the one the hedge went to.
 #[tokio::test]
 async fn a_hedge_and_its_win_land_on_the_overtaken_pair() {
     let slow = mock_rpc_server::slow("0xa", std::time::Duration::from_millis(500)).await;
@@ -162,6 +161,28 @@ async fn a_hedge_and_its_win_land_on_the_overtaken_pair() {
     assert_eq!(fast_to_slow, HedgeSnapshot { started: 0, won: 0 });
 
     assert_eq!(observer.snapshot(&ids[1]).unwrap().success, 1);
+}
+
+#[tokio::test]
+async fn an_overtaken_call_is_recorded_as_abandoned_at_the_overtake() {
+    let slow = mock_rpc_server::slow("0xa", std::time::Duration::from_millis(500)).await;
+    let fast = mock_rpc_server::ok("0xb").await;
+    let mut settings = settings(vec![rpc("slow", slow.uri()), rpc("fast", fast.uri())]);
+    settings.application.proxy.hedge.enabled = true;
+    settings.application.proxy.hedge.after_in_millis = 50;
+    let (ids, observer) = observer(&["slow", "fast"]);
+    let addr = spawn_app_with_observer(settings, observer.clone()).await;
+
+    post(&addr).await;
+
+    let slow = observer.snapshot(&ids[0]).unwrap();
+    assert_eq!(slow.abandoned, 1);
+    assert_eq!(slow.success, 0, "it never answered");
+    assert!(
+        (50_000..500_000).contains(&slow.duration_micros_total),
+        "dropped once the hedge answered, past hedge_after and short of its 500ms: {}us",
+        slow.duration_micros_total
+    );
 }
 
 #[tokio::test]

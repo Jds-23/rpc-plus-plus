@@ -238,6 +238,13 @@ mod tests {
         }
     }
 
+    fn record_abandoned(observer: &MetricsObserver, label: &str, n: u64) {
+        let id = UpstreamId::new(label);
+        for _ in 0..n {
+            observer.record_abandoned(&id, Duration::from_millis(1));
+        }
+    }
+
     fn order(decider: &PreferLeastErrors) -> Vec<String> {
         decider
             .decide(usize::MAX)
@@ -327,6 +334,22 @@ mod tests {
         record(&observer, "rival", 95, 5);
         refresher.refresh();
         assert_eq!(order(&decider), ["rival", "head"]);
+    }
+
+    #[test]
+    fn abandoned_attempts_are_not_errors() {
+        let (mut refresher, decider, observer) = harness(&["head", "rival"]);
+        record(&observer, "head", 40, 0);
+        record_abandoned(&observer, "head", 40);
+        record(&observer, "rival", 38, 2);
+
+        refresher.refresh();
+
+        assert_eq!(
+            order(&decider),
+            ["head", "rival"],
+            "the head's hedge losers were scored as failures"
+        );
     }
 
     #[test]
