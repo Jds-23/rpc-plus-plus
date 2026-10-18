@@ -8,7 +8,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::{ApplicationSettings, DeciderKind, Settings},
-    decider::{Decider, prefer_least_errors::PreferLeastErrors, round_robin::RoundRobin},
+    decider::{
+        Decider, least_latency::LeastLatency, prefer_least_errors::PreferLeastErrors,
+        round_robin::RoundRobin,
+    },
     http,
     observer::{MetricsObserver, prometheus::Collector},
     proxy::{Dispatch, Pipeline},
@@ -95,14 +98,17 @@ impl Application {
     }
 }
 
-/// Builds the configured decider. `PreferLeastErrors` owns a refresh task, so it
-/// takes `tasks` and `shutdown`; `RoundRobin` needs neither and ignores them.
+/// Builds the configured decider. `PreferLeastErrors` and `LeastLatency` own a
+/// refresh task, so they take `tasks` and `shutdown`; `RoundRobin` needs neither
+/// and ignores them. `rpc_timeout` is what `LeastLatency` charges a retryable
+/// failure.
 pub fn build_decider(
     kind: DeciderKind,
     upstreams: Vec<Upstream>,
     observer: Arc<MetricsObserver>,
     tasks: &mut JoinSet<()>,
     shutdown: CancellationToken,
+    rpc_timeout: Duration,
 ) -> Result<Arc<dyn Decider>> {
     let decider: Arc<dyn Decider> = match kind {
         DeciderKind::RoundRobin => {
@@ -113,6 +119,14 @@ pub fn build_decider(
             .observer(observer)
             .tasks(tasks)
             .shutdown(shutdown)
+            .spawn()
+            .context("failed to build the decider")?,
+        DeciderKind::LeastLatency => LeastLatency::builder()
+            .upstreams(upstreams)
+            .observer(observer)
+            .tasks(tasks)
+            .shutdown(shutdown)
+            .penalty(rpc_timeout)
             .spawn()
             .context("failed to build the decider")?,
     };
@@ -139,6 +153,7 @@ pub async fn build(settings: Settings, shutdown: &CancellationToken) -> Result<A
         observer.clone(),
         &mut tasks,
         shutdown.clone(),
+        Duration::from_secs(settings.application.proxy.rpc_timeout_in_secs),
     )?;
 
     Application::builder()
