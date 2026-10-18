@@ -156,7 +156,10 @@ impl SortKey {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::{Arc, atomic::AtomicU64},
+        time::Duration,
+    };
 
     use arc_swap::ArcSwap;
     use reqwest::StatusCode;
@@ -164,7 +167,7 @@ mod tests {
     use super::*;
     use crate::{
         decider::{
-            Decider, Ranking,
+            Ranking,
             least_latency::{MIN_WINDOW_SAMPLES, PROMOTION_MARGIN, REFRESH_DEFAULT},
             upstream,
         },
@@ -195,6 +198,7 @@ mod tests {
             .collect();
         let decider = Arc::new(LeastLatency {
             ranking: ArcSwap::from_pointee(Ranking { upstreams }),
+            requests: AtomicU64::new(0),
         });
         let refresher = LatencyRefresher {
             metrics_observer: observer.clone(),
@@ -250,7 +254,9 @@ mod tests {
 
     fn order(decider: &LeastLatency) -> Vec<String> {
         decider
-            .decide(usize::MAX)
+            .ranking
+            .load()
+            .upstreams
             .iter()
             .map(|upstream| upstream.id().to_string())
             .collect()

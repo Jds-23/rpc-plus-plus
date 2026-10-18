@@ -3,8 +3,13 @@ use std::time::{Duration, Instant};
 use futures_util::future::join_all;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
-use crate::common::{mock_rpc_server, rpc, spawn_app, test_settings};
+use crate::common::{
+    least_latency, mock_rpc_server, observer_for, rpc, spawn_app,
+    spawn_app_with_observer_and_decider, test_settings,
+};
 
 mod common;
 
@@ -431,4 +436,47 @@ async fn dedup_and_hedging_compose() {
     }
     assert_eq!(hits(&slow).await, 1, "one flight, one first call");
     assert_eq!(hits(&fast).await, 1, "and one hedge");
+}
+
+#[tokio::test]
+async fn least_latency_routes_away_from_an_upstream_that_slows_down() {
+    let a = mock_rpc_server::ok("0xa").await;
+    let b = mock_rpc_server::ok("0xb").await;
+    let c = mock_rpc_server::ok("0xc").await;
+    let settings = test_settings(vec![
+        rpc("a", a.uri()),
+        rpc("b", b.uri()),
+        rpc("c", c.uri()),
+    ]);
+    let observer = observer_for(&settings);
+    let shutdown = CancellationToken::new();
+    let mut tasks = JoinSet::new();
+    let decider = least_latency(
+        &settings,
+        observer.clone(),
+        &mut tasks,
+        shutdown.clone(),
+        Duration::from_millis(100),
+        10,
+        1,
+    );
+    let addr = spawn_app_with_observer_and_decider(settings, observer, decider).await;
+
+    mock_rpc_server::slow_down(&a, "0xa", UPSTREAM_DELAY).await;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let before = hits(&a).await;
+        all_at_once(&addr, (0..20).map(|id| block_number(id.into())).collect()).await;
+        if hits(&a).await - before <= 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "`a` answers in {UPSTREAM_DELAY:?} and still takes the head"
+        );
+    }
+
+    shutdown.cancel();
+    tasks.join_all().await;
 }
