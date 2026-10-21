@@ -88,10 +88,13 @@ impl Decider for LeastLatency {
             return ranking.upstreams.iter().take(max).cloned().collect();
         }
         let probed = (request / PROBE_EVERY) as usize % challengers + 1;
-        let mut chain = ranking.upstreams.clone();
-        chain[..=probed].rotate_right(1);
-        chain.truncate(max);
-        chain
+        let upstreams = &ranking.upstreams;
+        std::iter::once(&upstreams[probed])
+            .chain(&upstreams[..probed])
+            .chain(&upstreams[probed + 1..])
+            .take(max)
+            .cloned()
+            .collect()
     }
 
     fn upstream_len(&self) -> usize {
