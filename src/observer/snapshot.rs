@@ -23,6 +23,7 @@ pub struct UpstreamStats {
     pub read_failed: AtomicU64,
     pub error_status: AtomicU64,
     pub rpc_error: AtomicU64,
+    pub abandoned: AtomicU64,
 
     pub retryable_failures: AtomicU64,
 
@@ -39,6 +40,7 @@ impl UpstreamStats {
             read_failed: self.read_failed.load(Ordering::Relaxed),
             error_status: self.error_status.load(Ordering::Relaxed),
             rpc_error: self.rpc_error.load(Ordering::Relaxed),
+            abandoned: self.abandoned.load(Ordering::Relaxed),
             retryable_failures: self.retryable_failures.load(Ordering::Relaxed),
             buckets: self
                 .buckets
@@ -59,6 +61,7 @@ pub struct Snapshot {
     pub read_failed: u64,
     pub error_status: u64,
     pub rpc_error: u64,
+    pub abandoned: u64,
     pub retryable_failures: u64,
 
     pub buckets: [u64; BUCKET_BOUNDS_MICROS.len()],
@@ -94,6 +97,7 @@ pub struct Diff {
     read_failed: u64,
     error_status: u64,
     rpc_error: u64,
+    abandoned: u64,
     retryable_failures: u64,
     duration_micros: u64,
     retryable_failures_micros: u64,
@@ -106,30 +110,33 @@ impl Diff {
     pub fn success(&self) -> u64 {
         self.success
     }
-    pub fn total(&self) -> u64 {
+    pub fn answered(&self) -> u64 {
         self.error() + self.success()
     }
+    pub fn calls(&self) -> u64 {
+        self.answered() + self.abandoned
+    }
     pub fn error_rate(&self) -> f64 {
-        let total = self.total();
-        if total == 0 {
+        let answered = self.answered();
+        if answered == 0 {
             0.0
         } else {
-            self.error() as f64 / self.total() as f64
+            self.error() as f64 / answered as f64
         }
     }
     pub fn latency_score(&self, penalty: Duration) -> Option<Duration> {
-        let total = self.total();
-        if total == 0 {
+        let calls = self.calls();
+        if calls == 0 {
             return None;
         }
-        let answered_micros = self
+        let measured_micros = self
             .duration_micros
             .saturating_sub(self.retryable_failures_micros);
         let retryable_failures_cost_micros = self
             .retryable_failures
             .saturating_mul(penalty.as_micros() as u64);
         Some(Duration::from_micros(
-            answered_micros.saturating_add(retryable_failures_cost_micros) / total,
+            measured_micros.saturating_add(retryable_failures_cost_micros) / calls,
         ))
     }
 }
@@ -143,6 +150,7 @@ impl Snapshot {
             read_failed: d(|diff| diff.read_failed),
             error_status: d(|diff| diff.error_status),
             rpc_error: d(|diff| diff.rpc_error),
+            abandoned: d(|diff| diff.abandoned),
             retryable_failures: d(|diff| diff.retryable_failures),
             duration_micros: d(|diff| diff.duration_micros_total),
             retryable_failures_micros: d(|diff| diff.retryable_failures_micros_total),
@@ -172,6 +180,12 @@ mod tests {
 
         fn client_errors(mut self, n: u64, each: Duration) -> Self {
             self.0.error_status += n;
+            self.0.duration_micros_total += n * each.as_micros() as u64;
+            self
+        }
+
+        fn abandoned(mut self, n: u64, each: Duration) -> Self {
+            self.0.abandoned += n;
             self.0.duration_micros_total += n * each.as_micros() as u64;
             self
         }
@@ -238,6 +252,18 @@ mod tests {
             window.latency_score(PENALTY),
             Some(ms(40)),
             "a 4xx is not retryable, so it pays no penalty"
+        );
+    }
+
+    #[test]
+    fn an_abandoned_call_counts_at_the_time_it_ran() {
+        let window = Calls::default().ok(4, ms(30)).abandoned(1, ms(80)).window();
+
+        assert_eq!(window.latency_score(PENALTY), Some(ms(40)));
+        assert_eq!(
+            window.error_rate(),
+            0.0,
+            "nobody waited for the answer, so it is neither a success nor an error"
         );
     }
 

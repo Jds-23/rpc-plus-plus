@@ -12,7 +12,10 @@ use rpc_plus_plus::{
         ApplicationSettings, DeciderKind, DedupSettings, HedgeSettings, ProxySettings, Settings,
         UpstreamSettings,
     },
-    decider::{Decider, prefer_least_errors::PreferLeastErrors, round_robin::RoundRobin},
+    decider::{
+        Decider, least_latency::LeastLatency, prefer_least_errors::PreferLeastErrors,
+        round_robin::RoundRobin,
+    },
     observer::MetricsObserver,
     upstream::{Upstream, UpstreamId, build_all, build_http_client},
 };
@@ -91,6 +94,30 @@ pub fn prefer_least_errors(
         .shutdown(shutdown)
         .refresh(refresh)
         .window(window)
+        .spawn()
+        .expect("decider build failed")
+}
+
+pub fn least_latency(
+    settings: &Settings,
+    observer: Arc<MetricsObserver>,
+    tasks: &mut JoinSet<()>,
+    shutdown: CancellationToken,
+    refresh: Duration,
+    window: usize,
+    min_samples: u64,
+) -> Arc<dyn Decider> {
+    LeastLatency::builder()
+        .upstreams(upstreams(settings))
+        .observer(observer)
+        .tasks(tasks)
+        .shutdown(shutdown)
+        .penalty(Duration::from_secs(
+            settings.application.proxy.rpc_timeout_in_secs,
+        ))
+        .refresh(refresh)
+        .window(window)
+        .min_samples(min_samples)
         .spawn()
         .expect("decider build failed")
 }

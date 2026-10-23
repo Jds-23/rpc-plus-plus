@@ -26,6 +26,7 @@ const HEDGE_WINS_HELP: &str =
 const COALESCED_NAME: &str = "rpc_requests_coalesced_total";
 const COALESCED_HELP: &str = "Requests answered by another request's flight";
 const SUCCESS: &str = "success";
+const ABANDONED: &str = "abandoned";
 
 const MICROS_PER_SECOND: f64 = 1_000_000.0;
 
@@ -161,13 +162,14 @@ fn family(name: &str, help: &str, kind: MetricType, metrics: Vec<Metric>) -> Met
     family
 }
 
-fn outcomes(snapshot: &Snapshot) -> [(&'static str, u64); 5] {
+fn outcomes(snapshot: &Snapshot) -> [(&'static str, u64); 6] {
     [
         (SUCCESS, snapshot.success),
         (CallError::UNREACHABLE, snapshot.unreachable),
         (CallError::READ_FAILED, snapshot.read_failed),
         (CallError::ERROR_STATUS, snapshot.error_status),
         (CallError::RPC_ERROR, snapshot.rpc_error),
+        (ABANDONED, snapshot.abandoned),
     ]
 }
 
@@ -283,11 +285,13 @@ rpc_attempts_total{outcome="unreachable",upstream="alpha"} 2
 rpc_attempts_total{outcome="read_failed",upstream="alpha"} 1
 rpc_attempts_total{outcome="error_status",upstream="alpha"} 0
 rpc_attempts_total{outcome="rpc_error",upstream="alpha"} 1
+rpc_attempts_total{outcome="abandoned",upstream="alpha"} 1
 rpc_attempts_total{outcome="success",upstream="zulu"} 0
 rpc_attempts_total{outcome="unreachable",upstream="zulu"} 0
 rpc_attempts_total{outcome="read_failed",upstream="zulu"} 0
 rpc_attempts_total{outcome="error_status",upstream="zulu"} 0
 rpc_attempts_total{outcome="rpc_error",upstream="zulu"} 0
+rpc_attempts_total{outcome="abandoned",upstream="zulu"} 0
 "#;
 
     /// One 100ms attempt: `BUCKET_BOUNDS_MICROS` in seconds, cumulative from the
@@ -374,6 +378,8 @@ rpc_attempt_duration_seconds_count{upstream="alpha"} 1
                 duration: Duration::from_millis(150),
             },
         );
+
+        observer.record_abandoned(&alpha, Duration::from_millis(150));
 
         let actual = encode(&collector.collect(), ATTEMPTS_NAME);
 

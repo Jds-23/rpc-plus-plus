@@ -7,9 +7,9 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    decider::{Decider, prefer_least_errors::refresher::RankingRefresher},
+    decider::{BuildError, Decider, Ranking, prefer_least_errors::refresher::RankingRefresher},
     observer::MetricsObserver,
-    upstream::{Upstream, UpstreamId},
+    upstream::Upstream,
 };
 
 // Known gaps, carried in docs/design/v0.2-DECIDER.md under Known Bugs:
@@ -31,23 +31,8 @@ const MIN_WINDOW_SAMPLES: u64 = 20;
 /// A challenger has to be 20% better than the incumbent head to take its place.
 const PROMOTION_MARGIN: f64 = 0.8;
 
-/// The order `decide` hands out, best first.
-pub struct Ranking {
-    upstreams: Vec<Arc<Upstream>>,
-}
-
 pub struct PreferLeastErrors {
     ranking: ArcSwap<Ranking>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum BuildError {
-    #[error("upstream must not be empty")]
-    EmptyUpstreams,
-    #[error("upstream {0} is not tracked by the observer")]
-    UnknownUpstream(UpstreamId),
-    #[error("the minimum window is 1, given 0")]
-    ZeroWindow,
 }
 
 #[bon::bon]
@@ -103,16 +88,6 @@ impl Decider for PreferLeastErrors {
 }
 
 #[cfg(test)]
-fn upstream(label: &str) -> Upstream {
-    Upstream::builder()
-        .label(label)
-        .url(format!("http://{label}.invalid"))
-        .http(reqwest::Client::new())
-        .build()
-        .expect("upstream build failed")
-}
-
-#[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
@@ -120,6 +95,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::{decider::upstream, upstream::UpstreamId};
 
     fn ranked(labels: &[&str]) -> PreferLeastErrors {
         PreferLeastErrors {
