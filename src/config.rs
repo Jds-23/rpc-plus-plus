@@ -50,6 +50,7 @@ pub struct Settings {
 pub enum DeciderKind {
     RoundRobin,
     PreferLeastErrors,
+    LeastLatency,
 }
 
 impl DeciderKind {
@@ -57,6 +58,7 @@ impl DeciderKind {
         match self {
             DeciderKind::RoundRobin => "ROUND_ROBIN",
             DeciderKind::PreferLeastErrors => "PREFER_LEAST_ERRORS",
+            DeciderKind::LeastLatency => "LEAST_LATENCY",
         }
     }
 }
@@ -381,15 +383,20 @@ application:
         let settings = parse(&yaml).expect("the config should load");
 
         assert_eq!(settings.decider, DeciderKind::PreferLeastErrors);
+
+        let yaml = format!("{MINIMAL}decider: LEAST_LATENCY\n");
+        let settings = parse(&yaml).expect("the config should load");
+
+        assert_eq!(settings.decider, DeciderKind::LeastLatency);
     }
 
     /// `config` writes its own message here and does not list the valid variants,
     /// so the assertion is on the key and the offending value.
     #[test]
     fn an_unrecognised_decider_is_rejected_by_name() {
-        let error = error_of(&format!("{MINIMAL}decider: LEAST_LATENCY\n"), &[]);
+        let error = error_of(&format!("{MINIMAL}decider: FASTEST\n"), &[]);
 
-        assert!(error.contains("LEAST_LATENCY"), "{error}");
+        assert!(error.contains("FASTEST"), "{error}");
         assert!(error.contains("decider"), "{error}");
     }
 

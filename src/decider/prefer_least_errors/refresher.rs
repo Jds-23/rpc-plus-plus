@@ -8,7 +8,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    decider::prefer_least_errors::{PreferLeastErrors, Ranking},
+    decider::{Ranking, prefer_least_errors::PreferLeastErrors},
     observer::{MetricsObserver, snapshot::Snapshot},
     upstream::{Upstream, UpstreamId},
 };
@@ -77,7 +77,7 @@ impl RankingRefresher {
                     return (upstream.clone(), SortKey::unscored());
                 };
 
-                let key = if window.total() < self.min_samples {
+                let key = if window.answered() < self.min_samples {
                     // A starved upstream rates a perfect 0.0, which would unseat a
                     // proven one on no evidence.
                     SortKey::unscored()
@@ -100,6 +100,7 @@ impl RankingRefresher {
         let scores: Vec<String> = scored.iter().map(|(_, key)| key.render()).collect();
         tracing::info!(
             event = "ranking_rebuilt",
+            decider = "PREFER_LEAST_ERRORS",
             order = ?order,
             scores = ?scores,
             window_secs,
@@ -162,10 +163,9 @@ mod tests {
     use super::*;
     use crate::{
         decider::{
-            Decider,
-            prefer_least_errors::{
-                MIN_WINDOW_SAMPLES, PROMOTION_MARGIN, REFRESH_DEFAULT, Ranking, upstream,
-            },
+            Decider, Ranking,
+            prefer_least_errors::{MIN_WINDOW_SAMPLES, PROMOTION_MARGIN, REFRESH_DEFAULT},
+            upstream,
         },
         observer::Observer,
         upstream::call::{CallError, CallRecord},
@@ -235,6 +235,13 @@ mod tests {
                     duration: Duration::from_millis(1),
                 },
             );
+        }
+    }
+
+    fn record_abandoned(observer: &MetricsObserver, label: &str, n: u64) {
+        let id = UpstreamId::new(label);
+        for _ in 0..n {
+            observer.record_abandoned(&id, Duration::from_millis(1));
         }
     }
 
@@ -327,6 +334,22 @@ mod tests {
         record(&observer, "rival", 95, 5);
         refresher.refresh();
         assert_eq!(order(&decider), ["rival", "head"]);
+    }
+
+    #[test]
+    fn abandoned_attempts_are_not_errors() {
+        let (mut refresher, decider, observer) = harness(&["head", "rival"]);
+        record(&observer, "head", 40, 0);
+        record_abandoned(&observer, "head", 40);
+        record(&observer, "rival", 38, 2);
+
+        refresher.refresh();
+
+        assert_eq!(
+            order(&decider),
+            ["head", "rival"],
+            "the head's hedge losers were scored as failures"
+        );
     }
 
     #[test]
