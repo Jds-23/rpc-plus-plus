@@ -104,15 +104,21 @@ impl<R: Respond> Respond for Delayed<R> {
 
 /// Replies with `result`, but only after `delay`.
 pub async fn slow(result: impl Into<Value>, delay: std::time::Duration) -> MockServer {
-    let result = result.into();
     let server = MockServer::start().await;
+    slow_down(&server, result, delay).await;
+    server
+}
+
+/// Replaces whatever `server` replied with by `result` after `delay`.
+pub async fn slow_down(server: &MockServer, result: impl Into<Value>, delay: std::time::Duration) {
+    let result = result.into();
+    server.reset().await;
     Mock::given(method("POST"))
         .and(path("/"))
         .respond_with(Delayed {
             inner: RpcResponder(move |_: &Value| result.clone()),
             delay,
         })
-        .mount(&server)
+        .mount(server)
         .await;
-    server
 }

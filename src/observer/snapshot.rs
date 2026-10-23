@@ -110,19 +110,22 @@ impl Diff {
     pub fn success(&self) -> u64 {
         self.success
     }
-    pub fn total(&self) -> u64 {
+    pub fn answered(&self) -> u64 {
         self.error() + self.success()
     }
+    pub fn calls(&self) -> u64 {
+        self.answered() + self.abandoned
+    }
     pub fn error_rate(&self) -> f64 {
-        let total = self.total();
-        if total == 0 {
+        let answered = self.answered();
+        if answered == 0 {
             0.0
         } else {
-            self.error() as f64 / self.total() as f64
+            self.error() as f64 / answered as f64
         }
     }
     pub fn latency_score(&self, penalty: Duration) -> Option<Duration> {
-        let calls = self.total() + self.abandoned;
+        let calls = self.calls();
         if calls == 0 {
             return None;
         }
