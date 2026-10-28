@@ -4,7 +4,10 @@ use futures_util::future::join_all;
 use reqwest::StatusCode;
 use rpc_plus_plus::{
     config::{Settings, UpstreamSettings},
-    observer::{MetricsObserver, snapshot::HedgeSnapshot},
+    observer::{
+        MetricsObserver,
+        snapshot::{HedgeSnapshot, RequestSnapshot},
+    },
     upstream::UpstreamId,
 };
 use serde_json::json;
@@ -204,6 +207,42 @@ async fn every_follower_of_a_flight_is_counted_coalesced() {
 
     assert_eq!(slow.received_requests().await.unwrap().len(), 1);
     assert_eq!(observer.coalesced(), 4, "the leader made the call");
+    assert_eq!(observer.requests().answered, 1, "followers ran no chain");
+}
+
+#[tokio::test]
+async fn a_failover_is_one_request_of_two_attempts() {
+    let live = mock_rpc_server::ok("0x1").await;
+    let (_, observer) = observer(&["dead", "live"]);
+    let addr = spawn_app_with_observer(
+        settings(vec![rpc("dead", DEAD_URL), rpc("live", live.uri())]),
+        observer.clone(),
+    )
+    .await;
+
+    assert_eq!(post(&addr).await.status(), 200);
+
+    assert_eq!(
+        observer.requests(),
+        RequestSnapshot {
+            answered: 1,
+            failed: 0,
+            attempt_buckets: [0, 1, 0, 0, 0],
+            attempts_total: 2,
+        }
+    );
+}
+
+#[tokio::test]
+async fn an_exhausted_chain_is_a_failed_request() {
+    let (_, observer) = observer(&["dead"]);
+    let addr =
+        spawn_app_with_observer(settings(vec![rpc("dead", DEAD_URL)]), observer.clone()).await;
+
+    post(&addr).await;
+
+    let requests = observer.requests();
+    assert_eq!((requests.answered, requests.failed), (0, 1));
 }
 
 #[tokio::test]

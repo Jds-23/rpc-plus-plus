@@ -91,6 +91,40 @@ pub struct HedgeSnapshot {
     pub won: u64,
 }
 
+/// Past the last bound only `+Inf` counts it, like the duration ladder.
+pub const ATTEMPT_BOUNDS: [u64; 5] = [1, 2, 3, 5, 10];
+
+/// Requests that ran their own chain. Followers of a flight are not here.
+#[derive(Default)]
+pub struct RequestStats {
+    pub answered: AtomicU64,
+    pub failed: AtomicU64,
+    pub attempt_buckets: [AtomicU64; ATTEMPT_BOUNDS.len()],
+    pub attempts_total: AtomicU64,
+}
+
+impl RequestStats {
+    pub fn snapshot(&self) -> RequestSnapshot {
+        RequestSnapshot {
+            answered: self.answered.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+            attempt_buckets: self
+                .attempt_buckets
+                .each_ref()
+                .map(|bucket| bucket.load(Ordering::Relaxed)),
+            attempts_total: self.attempts_total.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RequestSnapshot {
+    pub answered: u64,
+    pub failed: u64,
+    pub attempt_buckets: [u64; ATTEMPT_BOUNDS.len()],
+    pub attempts_total: u64,
+}
+
 pub struct Diff {
     success: u64,
     unreachable: u64,

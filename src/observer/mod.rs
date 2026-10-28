@@ -14,7 +14,8 @@ use tracing::warn;
 
 use crate::{
     observer::snapshot::{
-        BUCKET_BOUNDS_MICROS, HedgeSnapshot, HedgeStats, Snapshot, UpstreamStats,
+        ATTEMPT_BOUNDS, BUCKET_BOUNDS_MICROS, HedgeSnapshot, HedgeStats, RequestSnapshot,
+        RequestStats, Snapshot, UpstreamStats,
     },
     upstream::{
         UpstreamId,
@@ -30,6 +31,8 @@ pub trait Observer: Send + Sync + 'static {
     /// The hedge from `overtaken` to `to` answered first.
     fn record_hedge_win(&self, overtaken: &UpstreamId, to: &UpstreamId);
     fn record_coalesced(&self);
+    /// Once per request that ran its own chain, however it ended.
+    fn record_request(&self, answered: bool, attempts: usize);
 }
 
 pub struct MetricsObserver {
@@ -38,6 +41,7 @@ pub struct MetricsObserver {
     /// never takes a lock.
     hedges: HashMap<(UpstreamId, UpstreamId), Arc<HedgeStats>>,
     coalesced: AtomicU64,
+    requests: RequestStats,
 }
 
 impl MetricsObserver {
@@ -59,6 +63,7 @@ impl MetricsObserver {
             stats,
             hedges,
             coalesced: AtomicU64::new(0),
+            requests: RequestStats::default(),
         }
     }
 
@@ -108,6 +113,10 @@ impl MetricsObserver {
         self.coalesced.load(Ordering::Relaxed)
     }
 
+    pub fn requests(&self) -> RequestSnapshot {
+        self.requests.snapshot()
+    }
+
     pub fn snapshot_map(&self) -> HashMap<UpstreamId, Snapshot> {
         let mut out = HashMap::new();
         for (upstream_id, stat) in self.stats.iter() {
@@ -132,6 +141,24 @@ impl Observer for MetricsObserver {
 
     fn record_coalesced(&self) {
         self.coalesced.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_request(&self, answered: bool, attempts: usize) {
+        let outcome = if answered {
+            &self.requests.answered
+        } else {
+            &self.requests.failed
+        };
+        outcome.fetch_add(1, Ordering::Relaxed);
+
+        let attempts = attempts as u64;
+        self.requests
+            .attempts_total
+            .fetch_add(attempts, Ordering::Relaxed);
+        let bucket_idx = ATTEMPT_BOUNDS.partition_point(|&b| b < attempts);
+        if let Some(bucket) = self.requests.attempt_buckets.get(bucket_idx) {
+            bucket.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn record(&self, upstream: &UpstreamId, record: CallRecord<'_>) {
@@ -451,6 +478,27 @@ mod tests {
         observer.record_coalesced();
 
         assert_eq!(observer.coalesced(), 2);
+    }
+
+    #[test]
+    fn requests_are_counted_by_outcome_and_attempts() {
+        let observer = create_observer();
+
+        observer.record_request(true, 1);
+        observer.record_request(true, 2);
+        observer.record_request(false, 3);
+        observer.record_request(false, 11);
+
+        assert_eq!(
+            observer.requests(),
+            RequestSnapshot {
+                answered: 2,
+                failed: 2,
+                attempt_buckets: [1, 1, 1, 0, 0],
+                attempts_total: 17,
+            },
+            "11 attempts is past the last bound: +Inf only"
+        );
     }
 
     #[test]

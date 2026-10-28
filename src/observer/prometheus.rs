@@ -8,7 +8,9 @@ use prometheus::{
 use crate::{
     observer::{
         MetricsObserver,
-        snapshot::{BUCKET_BOUNDS_MICROS, HedgeSnapshot, Snapshot},
+        snapshot::{
+            ATTEMPT_BOUNDS, BUCKET_BOUNDS_MICROS, HedgeSnapshot, RequestSnapshot, Snapshot,
+        },
     },
     upstream::call::CallError,
 };
@@ -25,7 +27,13 @@ const HEDGE_WINS_HELP: &str =
     "Hedge calls that overtook this upstream and answered first, by the upstream hedged to";
 const COALESCED_NAME: &str = "rpc_requests_coalesced_total";
 const COALESCED_HELP: &str = "Requests answered by another request's flight";
+const REQUESTS_NAME: &str = "rpc_requests_total";
+const REQUESTS_HELP: &str = "Requests that ran their own upstream chain, by outcome";
+const REQUEST_ATTEMPTS_NAME: &str = "rpc_request_attempts";
+const REQUEST_ATTEMPTS_HELP: &str =
+    "Upstream attempts per request, hedges included; above 1 means failover or a hedge";
 const SUCCESS: &str = "success";
+const FAILED: &str = "failed";
 const ABANDONED: &str = "abandoned";
 
 const MICROS_PER_SECOND: f64 = 1_000_000.0;
@@ -37,6 +45,8 @@ pub struct Collector {
     hedges_desc: Desc,
     hedge_wins_desc: Desc,
     coalesced_desc: Desc,
+    requests_desc: Desc,
+    request_attempts_desc: Desc,
 }
 
 impl Collector {
@@ -61,6 +71,18 @@ impl Collector {
             vec![],
             HashMap::new(),
         )?;
+        let requests_desc = Desc::new(
+            REQUESTS_NAME.to_string(),
+            REQUESTS_HELP.to_string(),
+            vec!["outcome".to_string()],
+            HashMap::new(),
+        )?;
+        let request_attempts_desc = Desc::new(
+            REQUEST_ATTEMPTS_NAME.to_string(),
+            REQUEST_ATTEMPTS_HELP.to_string(),
+            vec![],
+            HashMap::new(),
+        )?;
         Ok(Collector {
             observer,
             attempts_desc,
@@ -68,6 +90,8 @@ impl Collector {
             hedges_desc,
             hedge_wins_desc,
             coalesced_desc,
+            requests_desc,
+            request_attempts_desc,
         })
     }
 }
@@ -95,6 +119,7 @@ impl PrometheusCollector for Collector {
             .collect();
 
         let hedges = self.observer.hedge_snapshots();
+        let requests = self.observer.requests();
         let per_pair = |count: fn(&HedgeSnapshot) -> u64| {
             hedges
                 .iter()
@@ -130,6 +155,21 @@ impl PrometheusCollector for Collector {
                 MetricType::COUNTER,
                 vec![unlabelled_counter_metric(self.observer.coalesced())],
             ),
+            family(
+                REQUESTS_NAME,
+                REQUESTS_HELP,
+                MetricType::COUNTER,
+                vec![
+                    outcome_counter_metric(SUCCESS, requests.answered),
+                    outcome_counter_metric(FAILED, requests.failed),
+                ],
+            ),
+            family(
+                REQUEST_ATTEMPTS_NAME,
+                REQUEST_ATTEMPTS_HELP,
+                MetricType::HISTOGRAM,
+                vec![attempts_histogram_metric(&requests)],
+            ),
         ]
     }
     fn desc(&self) -> Vec<&Desc> {
@@ -139,6 +179,8 @@ impl PrometheusCollector for Collector {
             &self.hedges_desc,
             &self.hedge_wins_desc,
             &self.coalesced_desc,
+            &self.requests_desc,
+            &self.request_attempts_desc,
         ]
     }
 }
@@ -205,7 +247,30 @@ fn histogram_metric(upstream: &str, snapshot: &Snapshot) -> Metric {
     }
 }
 
-fn cumulative(buckets: [u64; BUCKET_BOUNDS_MICROS.len()]) -> [u64; BUCKET_BOUNDS_MICROS.len()] {
+fn attempts_histogram_metric(requests: &RequestSnapshot) -> Metric {
+    let buckets = ATTEMPT_BOUNDS
+        .iter()
+        .zip(cumulative(requests.attempt_buckets))
+        .map(|(bound, count)| Bucket {
+            upper_bound: Some(*bound as f64),
+            cumulative_count: Some(count),
+            ..Default::default()
+        })
+        .collect();
+
+    Metric {
+        histogram: Histogram {
+            sample_count: Some(requests.answered + requests.failed),
+            sample_sum: Some(requests.attempts_total as f64),
+            bucket: buckets,
+            ..Default::default()
+        }
+        .into(),
+        ..Default::default()
+    }
+}
+
+fn cumulative<const N: usize>(buckets: [u64; N]) -> [u64; N] {
     let mut running = 0;
     buckets.map(|count| {
         running += count;
@@ -220,6 +285,18 @@ fn attempts(snapshot: &Snapshot) -> u64 {
 fn pair_counter_metric(upstream: &str, to: &str, value: u64) -> Metric {
     Metric {
         label: vec![label("upstream", upstream), label("to", to)],
+        counter: Counter {
+            value: Some(value as f64),
+            ..Default::default()
+        }
+        .into(),
+        ..Default::default()
+    }
+}
+
+fn outcome_counter_metric(outcome: &str, value: u64) -> Metric {
+    Metric {
+        label: vec![label("outcome", outcome)],
         counter: Counter {
             value: Some(value as f64),
             ..Default::default()
@@ -269,7 +346,7 @@ mod tests {
             MetricsObserver, Observer,
             prometheus::{
                 ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, COALESCED_NAME, Collector, HEDGE_WINS_NAME,
-                HEDGES_NAME, cumulative,
+                HEDGES_NAME, REQUEST_ATTEMPTS_NAME, REQUESTS_NAME, cumulative,
             },
         },
         upstream::{
@@ -472,8 +549,48 @@ rpc_requests_coalesced_total 2
                 ATTEMPTS_DURATION_NAME,
                 HEDGES_NAME,
                 HEDGE_WINS_NAME,
-                COALESCED_NAME
+                COALESCED_NAME,
+                REQUESTS_NAME,
+                REQUEST_ATTEMPTS_NAME,
             ]
+        );
+    }
+
+    const EXPECTED_REQUESTS: &str = r#"# HELP rpc_requests_total Requests that ran their own upstream chain, by outcome
+# TYPE rpc_requests_total counter
+rpc_requests_total{outcome="success"} 2
+rpc_requests_total{outcome="failed"} 1
+"#;
+
+    /// One request per path: answered first try, failed over once, exhausted 3.
+    const EXPECTED_REQUEST_ATTEMPTS: &str = r#"# HELP rpc_request_attempts Upstream attempts per request, hedges included; above 1 means failover or a hedge
+# TYPE rpc_request_attempts histogram
+rpc_request_attempts_bucket{le="1"} 1
+rpc_request_attempts_bucket{le="2"} 2
+rpc_request_attempts_bucket{le="3"} 3
+rpc_request_attempts_bucket{le="5"} 3
+rpc_request_attempts_bucket{le="10"} 3
+rpc_request_attempts_bucket{le="+Inf"} 3
+rpc_request_attempts_sum 6
+rpc_request_attempts_count 3
+"#;
+
+    #[test]
+    fn requests_render_by_outcome_and_attempts() {
+        let alpha = UpstreamId::new("alpha");
+        let observer = Arc::new(MetricsObserver::new(vec![alpha]));
+        let collector = Collector::new(observer.clone()).unwrap();
+
+        observer.record_request(true, 1);
+        observer.record_request(true, 2);
+        observer.record_request(false, 3);
+
+        let families = collector.collect();
+
+        assert_eq!(encode(&families, REQUESTS_NAME), EXPECTED_REQUESTS);
+        assert_eq!(
+            encode(&families, REQUEST_ATTEMPTS_NAME),
+            EXPECTED_REQUEST_ATTEMPTS
         );
     }
 
