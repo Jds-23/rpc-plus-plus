@@ -208,6 +208,8 @@ async fn run(
         (Dispatch::Hedged, true) => core.send_once(&chain, &body).await,
         (Dispatch::Sequential, _) => core.walk(&chain, &body).await,
     };
+    core.observer
+        .record_request(finished.result.is_ok(), finished.tried.len());
     finish(finished, received_at)
 }
 

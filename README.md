@@ -19,7 +19,7 @@ Round-robin or error-rate-ranked selection across upstreams, with retry failover
 |---|---|
 | `POST /rpc` | Raw JSON-RPC passthrough. Batches rejected with HTTP 400 |
 | `GET /healthz` | Liveness |
-| `GET /metrics` | Prometheus exposition: attempts by outcome, attempt duration, hedges, hedge wins, coalesced requests |
+| `GET /metrics` | Prometheus exposition: requests by outcome, attempts per request, attempts by outcome, attempt duration, hedges, hedge wins, coalesced requests |
 
 Deliberately not here yet: caching, least-latency routing, auth, multichain. Each release's known gaps are listed in its design doc under [docs/design/](docs/design/) — read them before deploying this anywhere real.
 
@@ -72,6 +72,28 @@ The pre-rename spellings still load. `rpcs:` and `rpc_url:` are accepted silentl
 Set `RPC_CONFIG_PATH` to read the config from somewhere other than `./settings.yaml`.
 
 `application.host` stays on loopback unless you widen it deliberately — inside a container it has to be `0.0.0.0`. There is no auth yet, so a reachable proxy is an open relay spending your upstream API keys.
+
+## Dashboard
+
+```sh
+docker compose up -d --build   # proxy on :8080, Prometheus on :9090, Grafana on :3000
+scripts/load.sh -u http://127.0.0.1:8080
+```
+
+Grafana opens on the provisioned **rpc-plus-plus** dashboard without a login (anonymous Viewer; `admin`/`admin` to edit). The Prometheus datasource and the dashboard are files under [docker/grafana/](docker/grafana/), so they come back on every `docker compose up`.
+
+![rpc-plus-plus Grafana dashboard](docs/images/grafana-dashboard.png)
+
+| Panel | From |
+|---|---|
+| Request rate, requests by outcome | `rpc_requests_total{outcome}` + `rpc_requests_coalesced_total` |
+| Attempts by outcome | `rpc_attempts_total{outcome,upstream}` |
+| p50 / p95 / p99 per upstream | `rpc_attempt_duration_seconds` |
+| Error rate by upstream | failed answers over all answers in `rpc_attempts_total`; abandoned calls left out |
+| Failover | `rpc_request_attempts`: requests that took more than one attempt |
+| Hedges, hedge win rate | `rpc_hedges_total`, `rpc_hedge_wins_total` by overtaken `upstream` |
+
+`rpc_requests_total` counts each request that ran its own upstream chain, once, however it ended; a coalesced follower shows up in `rpc_requests_coalesced_total` instead, and a rejected batch in neither. `rpc_request_attempts` is how many upstream calls that chain made. With hedging on, a hedge is an attempt too, so "more than one attempt" means failover *or* a hedge.
 
 ## Layout
 
