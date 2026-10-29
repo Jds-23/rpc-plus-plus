@@ -39,7 +39,6 @@ pub struct ApplicationSettings {
     pub port: u16,
     pub host: String,
     pub proxy: ProxySettings,
-    #[serde(default)]
     pub cors: CorsSettings,
 }
 #[derive(serde::Deserialize)]
@@ -134,6 +133,7 @@ where
         .set_default("application.proxy.hedge.enabled", false)?
         .set_default("application.proxy.hedge.after_in_millis", 250)?
         .set_default("application.proxy.dedup.enabled", false)?
+        .set_default("application.cors.allowed_origins", Vec::<String>::new())?
         .set_default("decider", "ROUND_ROBIN")?
         .add_source(source)
         .build()?
@@ -311,23 +311,29 @@ fn validate_origin(origin: &str) -> Result<(), &'static str> {
     let Some(authority) = uri.authority() else {
         return Err("must be scheme://host[:port]");
     };
-    if authority.host().is_empty() || authority.as_str().contains('@') {
+    if authority.host().is_empty() {
         return Err("must be scheme://host[:port]");
     }
     if origin.ends_with('/') {
         return Err("must not end with a slash");
     }
-    // `Uri` reports a bare `scheme://host` as path "/".
-    if uri.path_and_query().is_some_and(|pq| pq.as_str() != "/") {
-        return Err("must not have a path or query");
-    }
     if origin != origin.to_ascii_lowercase() {
         return Err("must be lowercase");
     }
-    match (scheme, authority.port_u16()) {
-        ("https", Some(443)) | ("http", Some(80)) => Err("must omit the default port"),
-        _ => Ok(()),
+    let port = authority.port_u16();
+    if let ("https", Some(443)) | ("http", Some(80)) = (scheme, port) {
+        return Err("must omit the default port");
     }
+
+    let canonical = match port {
+        Some(port) => format!("{scheme}://{}:{port}", authority.host()),
+        None => format!("{scheme}://{}", authority.host()),
+    };
+    if origin != canonical {
+        return Err("must be exactly scheme://host[:port]");
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -700,8 +706,8 @@ application:
     fn a_malformed_cors_origin_is_rejected_by_value() {
         let cases = [
             ("https://app.example/", "slash"),
-            ("https://app.example/dapp", "path"),
-            ("https://app.example?x=1", "path or query"),
+            ("https://app.example/dapp", "exactly"),
+            ("https://app.example?x=1", "exactly"),
             ("app.example", "scheme://host"),
             ("ftp://app.example", "http or https"),
             ("null", "scheme://host"),
@@ -709,7 +715,10 @@ application:
             ("https://App.Example", "lowercase"),
             ("https://app.example:443", "default port"),
             ("http://app.example:80", "default port"),
-            ("https://user@app.example", "scheme://host"),
+            ("https://user@app.example", "exactly"),
+            ("https://app.example:08443", "exactly"),
+            ("https://app.example#x", "exactly"),
+            ("https://app.example:", "exactly"),
         ];
 
         for (origin, reason) in cases {
@@ -729,5 +738,12 @@ application:
             settings.application.cors.allowed_origins,
             ["https://app.example:8443"]
         );
+    }
+
+    #[test]
+    fn an_empty_cors_block_means_no_origins() {
+        let settings = parse(&format!("{MINIMAL}  cors: {{}}\n")).expect("the config should load");
+
+        assert!(settings.application.cors.allowed_origins.is_empty());
     }
 }
