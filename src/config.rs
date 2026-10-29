@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use axum::http::{HeaderValue, Uri};
 use config::{Config, Source};
 
 const DEFAULT_CONFIG_FILE: &str = "settings.yaml";
@@ -28,11 +29,19 @@ pub struct ProxySettings {
     pub hedge: HedgeSettings,
     pub dedup: DedupSettings,
 }
+/// Empty means no CORS layer at all. `["*"]` allows any origin.
+#[derive(serde::Deserialize, Default)]
+pub struct CorsSettings {
+    pub allowed_origins: Vec<String>,
+}
+
 #[derive(serde::Deserialize)]
 pub struct ApplicationSettings {
     pub port: u16,
     pub host: String,
     pub proxy: ProxySettings,
+    #[serde(default)]
+    pub cors: CorsSettings,
 }
 #[derive(serde::Deserialize)]
 pub struct Settings {
@@ -93,6 +102,15 @@ pub enum SettingsError {
     ZeroHedgeAfter,
     #[error("upstream {label} has hedge_after_in_millis 0, must be at least 1")]
     ZeroUpstreamHedgeAfter { label: String },
+    #[error("cors origin {origin:?} {reason}")]
+    InvalidCorsOrigin {
+        origin: String,
+        reason: &'static str,
+    },
+    #[error("duplicate cors origin {0}")]
+    DuplicateCorsOrigin(String),
+    #[error("cors origin \"*\" must be the only entry")]
+    WildcardCorsOriginMixed,
 }
 
 pub fn get_settings() -> Result<Settings> {
@@ -152,6 +170,10 @@ fn expand_env(
         rpc.url = expand_str(&rpc.url, get)?;
     }
 
+    for origin in &mut settings.application.cors.allowed_origins {
+        *origin = expand_str(origin, get)?;
+    }
+
     Ok(())
 }
 
@@ -195,6 +217,8 @@ fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
         return Err(SettingsError::ZeroHedgeAfter);
     }
     let rpc_timeout_in_millis = proxy.rpc_timeout_in_secs.saturating_mul(1000);
+
+    validate_cors(&settings.application.cors)?;
 
     let mut labels: HashSet<&str> = HashSet::new();
     let mut urls: HashMap<&str, &str> = HashMap::new();
@@ -244,6 +268,71 @@ fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
     }
 
     Ok(())
+}
+
+pub(crate) const WILDCARD_ORIGIN: &str = "*";
+
+fn validate_cors(cors: &CorsSettings) -> Result<(), SettingsError> {
+    let origins = &cors.allowed_origins;
+    if origins.iter().any(|origin| origin == WILDCARD_ORIGIN) {
+        return match origins.len() {
+            1 => Ok(()),
+            _ => Err(SettingsError::WildcardCorsOriginMixed),
+        };
+    }
+
+    let mut seen: HashSet<&str> = HashSet::new();
+    for origin in origins {
+        validate_origin(origin).map_err(|reason| SettingsError::InvalidCorsOrigin {
+            origin: origin.clone(),
+            reason,
+        })?;
+        if !seen.insert(origin.as_str()) {
+            return Err(SettingsError::DuplicateCorsOrigin(origin.clone()));
+        }
+    }
+
+    Ok(())
+}
+
+/// Browsers send `Origin` as lowercase `scheme://host[:port]`, without a default
+/// port, and the allow-list matches it byte for byte. Any other spelling of the
+/// same origin would never match, so it is rejected here instead.
+fn validate_origin(origin: &str) -> Result<(), &'static str> {
+    if origin.trim() != origin {
+        return Err("has surrounding whitespace");
+    }
+    if HeaderValue::from_str(origin).is_err() {
+        return Err("is not a valid header value");
+    }
+    let uri: Uri = origin.parse().map_err(|_| "must be scheme://host[:port]")?;
+
+    let scheme = match uri.scheme_str() {
+        Some(scheme @ ("http" | "https")) => scheme,
+        Some(_) => return Err("must use http or https"),
+        None => return Err("must be scheme://host[:port]"),
+    };
+    let Some(authority) = uri.authority() else {
+        return Err("must be scheme://host[:port]");
+    };
+    if authority.host().is_empty() || authority.as_str().contains('@') {
+        return Err("must be scheme://host[:port]");
+    }
+    if origin.ends_with('/') {
+        return Err("must not end with a slash");
+    }
+    // `Uri` reports a bare `scheme://host` as path "/"; a real trailing slash
+    // was rejected above.
+    if uri.path_and_query().is_some_and(|pq| pq.as_str() != "/") {
+        return Err("must not have a path or query");
+    }
+    if origin != origin.to_ascii_lowercase() {
+        return Err("must be lowercase");
+    }
+    match (scheme, authority.port_u16()) {
+        ("https", Some(443)) | ("http", Some(80)) => Err("must omit the default port"),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -304,6 +393,7 @@ application:
         assert_eq!(settings.application.proxy.hedge.after_in_millis, 250);
         assert_eq!(settings.upstreams[0].hedge_after_in_millis, None);
         assert!(!settings.application.proxy.dedup.enabled);
+        assert!(settings.application.cors.allowed_origins.is_empty());
     }
 
     #[test]
@@ -446,13 +536,14 @@ application:
     #[test]
     fn every_string_field_is_expanded() {
         let yaml = format!(
-            "{}  host: ${{HOST}}\n",
+            "{}  host: ${{HOST}}\n  cors:\n    allowed_origins: [\"https://${{DAPP}}\"]\n",
             upstreams(&[("${NAME}", "https://provider.example/${A}/${B}")])
         );
         let settings = parse_with_env(
             &yaml,
             &[
                 ("HOST", "0.0.0.0"),
+                ("DAPP", "app.example"),
                 ("NAME", "alchemy"),
                 ("A", "v2"),
                 ("B", "key"),
@@ -463,6 +554,10 @@ application:
         assert_eq!(settings.application.host, "0.0.0.0");
         assert_eq!(settings.upstreams[0].label, "alchemy");
         assert_eq!(settings.upstreams[0].url, "https://provider.example/v2/key");
+        assert_eq!(
+            settings.application.cors.allowed_origins,
+            ["https://app.example"]
+        );
     }
 
     #[test]
@@ -557,5 +652,89 @@ application:
         let error = error_of(&yaml, &[]);
 
         assert!(error.contains("empty url"), "{error}");
+    }
+
+    fn with_origins(origins: &[&str]) -> String {
+        let list = origins
+            .iter()
+            .map(|origin| format!("{origin:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{MINIMAL}  cors:\n    allowed_origins: [{list}]\n")
+    }
+
+    #[test]
+    fn cors_origins_are_read_from_the_application_block() {
+        let settings = parse(&with_origins(&[
+            "https://app.example",
+            "http://localhost:3000",
+        ]))
+        .expect("the config should load");
+
+        assert_eq!(
+            settings.application.cors.allowed_origins,
+            ["https://app.example", "http://localhost:3000"]
+        );
+    }
+
+    #[test]
+    fn a_lone_wildcard_origin_is_allowed() {
+        let settings = parse(&with_origins(&["*"])).expect("the config should load");
+
+        assert_eq!(settings.application.cors.allowed_origins, ["*"]);
+    }
+
+    #[test]
+    fn a_wildcard_mixed_with_origins_is_an_error() {
+        let error = error_of(&with_origins(&["https://app.example", "*"]), &[]);
+
+        assert!(error.contains("only entry"), "{error}");
+    }
+
+    #[test]
+    fn a_duplicate_cors_origin_is_an_error() {
+        let error = error_of(
+            &with_origins(&["https://app.example", "https://app.example"]),
+            &[],
+        );
+
+        assert!(error.contains("duplicate cors origin"), "{error}");
+    }
+
+    /// Each of these differs from what a browser puts in `Origin`, so it could
+    /// never match.
+    #[test]
+    fn a_malformed_cors_origin_is_rejected_by_value() {
+        let cases = [
+            ("https://app.example/", "slash"),
+            ("https://app.example/dapp", "path"),
+            ("https://app.example?x=1", "path or query"),
+            ("app.example", "scheme://host"),
+            ("ftp://app.example", "http or https"),
+            ("null", "scheme://host"),
+            (" https://app.example", "whitespace"),
+            ("https://App.Example", "lowercase"),
+            ("https://app.example:443", "default port"),
+            ("http://app.example:80", "default port"),
+            ("https://user@app.example", "scheme://host"),
+        ];
+
+        for (origin, reason) in cases {
+            let error = error_of(&with_origins(&[origin]), &[]);
+
+            assert!(error.contains(origin.trim()), "{origin}: {error}");
+            assert!(error.contains(reason), "{origin}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_non_default_port_is_kept() {
+        let settings =
+            parse(&with_origins(&["https://app.example:8443"])).expect("the config should load");
+
+        assert_eq!(
+            settings.application.cors.allowed_origins,
+            ["https://app.example:8443"]
+        );
     }
 }

@@ -5,20 +5,33 @@ use axum::{
     routing::{get, post},
 };
 use prometheus::Registry;
+use tower_http::cors::CorsLayer;
 
 use crate::{
     http::{healthz::get_healthz, metrics::get_metrics, rpc::post_rpc},
     proxy::Pipeline,
 };
 
+pub(crate) mod cors;
 pub mod healthz;
 pub mod metrics;
 pub mod rpc;
 
-pub(crate) fn build_router(pipeline: Arc<Pipeline>, registry: Arc<Registry>) -> Router {
+pub(crate) fn build_router(
+    pipeline: Arc<Pipeline>,
+    registry: Arc<Registry>,
+    cors: Option<CorsLayer>,
+) -> Router {
+    // `layer`, not `route_layer`: the preflight is an OPTIONS, which only reaches
+    // the CORS layer through the method router's 405 fallback.
+    let rpc = match cors {
+        Some(cors) => post(post_rpc).layer(cors),
+        None => post(post_rpc),
+    };
+
     Router::new()
         .route("/healthz", get(get_healthz))
-        .route("/rpc", post(post_rpc))
+        .route("/rpc", rpc)
         .with_state(pipeline)
         .merge(
             Router::new()

@@ -57,7 +57,8 @@ impl Application {
             .dedup(settings.proxy.dedup.enabled)
             .build()?;
 
-        let router = http::build_router(Arc::new(pipeline), Arc::new(registry));
+        let cors = http::cors::layer(&settings.cors)?;
+        let router = http::build_router(Arc::new(pipeline), Arc::new(registry), cors);
 
         let addr = format!("{}:{}", settings.host, settings.port);
         let listener = TcpListener::bind(&addr)
