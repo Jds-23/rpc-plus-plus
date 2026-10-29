@@ -22,7 +22,7 @@ eRPC from its README and [docs.erpc.cloud](https://docs.erpc.cloud/), read 2026-
 | `eth_getLogs` splitting | ✗ | ✓ |
 | Rate limits / budgets | ✗ | ✓ four layers, compute-unit budgets, auto-tuning |
 | Auth | ✗ deprioritized (spec §3.5) | ✓ token, JWT, SIWE, basic auth, IP allowlist |
-| CORS | ✗ | ✓ |
+| CORS | ✓ `/rpc` only, allow-listed origins or `*` | ✓ |
 | Error normalization | ✗ passed through | ✓ same codes across providers |
 | Health endpoint | ✓ `GET /healthz`, liveness only | ✓ 8 probe strategies; ready, draining or broken |
 | Metrics | ✓ Prometheus `/metrics`: attempts by outcome, attempt duration, hedges, hedge wins | ✓ ~141 metrics, Grafana dashboard (80+ panels), alert rules |

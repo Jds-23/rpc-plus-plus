@@ -46,6 +46,8 @@ application:
       after_in_millis: 250    # default 250
     dedup:
       enabled: false          # default false
+  cors:
+    allowed_origins: []       # default [], no CORS
 
 upstreams:                    # required, at least one
   - label: alchemy
@@ -64,6 +66,8 @@ Only `application.port` and `upstreams` are required. Upstreams are referred to 
 `hedge` races the next upstream in the chain once the current one has gone `after_in_millis` without answering, and takes whichever answers first. Writes are never hedged. `after_in_millis` and every per-upstream override must be at least 1. Hedges show up as `rpc_hedges_total` and `rpc_hedge_wins_total`, labelled by the overtaken `upstream` and the one hedged `to`. Design: [v0.3-HEDGING.md](docs/design/v0.3-HEDGING.md).
 
 `dedup` makes concurrent requests with the same `method` and `params` share one upstream call. Each caller still gets its own `id` back. Only idempotent reads are coalesced; writes, notifications and unknown methods always run on their own. It is not a cache: a request arriving after the shared call finished makes a fresh one. Hedging and dedup compose. Every request answered by another's call counts towards `rpc_requests_coalesced_total`, and logs a `request_coalesced` line carrying the `leader_request_id` whose upstream attempts it shared. Design: [v0.4-DEDUP.md](docs/design/v0.4-DEDUP.md).
+
+`cors.allowed_origins` lets browser dapps on those origins call `/rpc`. Empty means no CORS headers at all, which is the behaviour from before CORS existed. `["*"]` allows any origin, and `*` must be the only entry. Every origin has to be written exactly as browsers send it in `Origin`: lowercase `scheme://host[:port]`, with no path, no trailing slash and no default port. Any other spelling could never match, so it fails startup. Only `POST` with a `Content-Type` header is allowed, and browsers may cache the preflight for an hour. CORS only decides which pages can read the responses. It is not access control, because curl and backends ignore it.
 
 The pre-rename spellings still load. `rpcs:` and `rpc_url:` are accepted silently as aliases for `upstreams:` and `url:`; a top-level `rpc_timeout_in_secs` still wins over the one under `application.proxy` and logs one `config_key_deprecated` warn at startup.
 

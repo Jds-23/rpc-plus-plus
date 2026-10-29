@@ -20,6 +20,13 @@ application:
     # Off by default. When on, concurrent identical reads share one upstream call.
     # dedup:
     #   enabled: false
+  # Off by default. Origins of browser dapps allowed to call /rpc, exactly as the
+  # browser sends them: lowercase scheme://host[:port], no trailing slash.
+  # ["*"] allows any origin, which with no auth lets any website use your keys.
+  # cors:
+  #   allowed_origins:
+  #     - https://app.example
+  #     - http://localhost:3000
 
 upstreams:
   - label: alchemy
