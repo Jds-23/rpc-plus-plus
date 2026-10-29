@@ -21,7 +21,6 @@ async fn spawn_with_origins(origins: &[&str], upstream: &str) -> String {
     spawn_app(settings).await
 }
 
-/// What a browser sends before a `fetch` with a JSON body.
 async fn preflight(addr: &str, origin: &str) -> Response {
     reqwest::Client::new()
         .request(reqwest::Method::OPTIONS, format!("{addr}/rpc"))
@@ -53,8 +52,6 @@ async fn a_preflight_from_an_allowed_origin_is_granted() {
     assert_eq!(header(&res, &ACCESS_CONTROL_MAX_AGE), Some("3600"));
 }
 
-/// The layer still answers the preflight; the missing allow-origin header is
-/// what makes the browser refuse.
 #[tokio::test]
 async fn a_preflight_from_another_origin_gets_no_allow_origin() {
     let addr = spawn_with_origins(&[ALLOWED], DEAD_URL).await;

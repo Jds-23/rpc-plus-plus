@@ -22,8 +22,7 @@ pub(crate) fn build_router(
     registry: Arc<Registry>,
     cors: Option<CorsLayer>,
 ) -> Router {
-    // `layer`, not `route_layer`: the preflight is an OPTIONS, which only reaches
-    // the CORS layer through the method router's 405 fallback.
+    // Not `route_layer`: the OPTIONS preflight lands in the 405 fallback.
     let rpc = match cors {
         Some(cors) => post(post_rpc).layer(cors),
         None => post(post_rpc),

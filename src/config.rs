@@ -29,7 +29,6 @@ pub struct ProxySettings {
     pub hedge: HedgeSettings,
     pub dedup: DedupSettings,
 }
-/// Empty means no CORS layer at all. `["*"]` allows any origin.
 #[derive(serde::Deserialize, Default)]
 pub struct CorsSettings {
     pub allowed_origins: Vec<String>,
@@ -295,9 +294,6 @@ fn validate_cors(cors: &CorsSettings) -> Result<(), SettingsError> {
     Ok(())
 }
 
-/// Browsers send `Origin` as lowercase `scheme://host[:port]`, without a default
-/// port, and the allow-list matches it byte for byte. Any other spelling of the
-/// same origin would never match, so it is rejected here instead.
 fn validate_origin(origin: &str) -> Result<(), &'static str> {
     if origin.trim() != origin {
         return Err("has surrounding whitespace");
@@ -321,8 +317,7 @@ fn validate_origin(origin: &str) -> Result<(), &'static str> {
     if origin.ends_with('/') {
         return Err("must not end with a slash");
     }
-    // `Uri` reports a bare `scheme://host` as path "/"; a real trailing slash
-    // was rejected above.
+    // `Uri` reports a bare `scheme://host` as path "/".
     if uri.path_and_query().is_some_and(|pq| pq.as_str() != "/") {
         return Err("must not have a path or query");
     }
@@ -701,8 +696,6 @@ application:
         assert!(error.contains("duplicate cors origin"), "{error}");
     }
 
-    /// Each of these differs from what a browser puts in `Origin`, so it could
-    /// never match.
     #[test]
     fn a_malformed_cors_origin_is_rejected_by_value() {
         let cases = [
