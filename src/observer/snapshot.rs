@@ -101,6 +101,8 @@ pub struct RequestStats {
     pub failed: AtomicU64,
     pub attempt_buckets: [AtomicU64; ATTEMPT_BOUNDS.len()],
     pub attempts_total: AtomicU64,
+    pub duration_buckets: [AtomicU64; BUCKET_BOUNDS_MICROS.len()],
+    pub duration_micros_total: AtomicU64,
 }
 
 impl RequestStats {
@@ -113,6 +115,11 @@ impl RequestStats {
                 .each_ref()
                 .map(|bucket| bucket.load(Ordering::Relaxed)),
             attempts_total: self.attempts_total.load(Ordering::Relaxed),
+            duration_buckets: self
+                .duration_buckets
+                .each_ref()
+                .map(|bucket| bucket.load(Ordering::Relaxed)),
+            duration_micros_total: self.duration_micros_total.load(Ordering::Relaxed),
         }
     }
 }
@@ -123,6 +130,8 @@ pub struct RequestSnapshot {
     pub failed: u64,
     pub attempt_buckets: [u64; ATTEMPT_BOUNDS.len()],
     pub attempts_total: u64,
+    pub duration_buckets: [u64; BUCKET_BOUNDS_MICROS.len()],
+    pub duration_micros_total: u64,
 }
 
 pub struct Diff {

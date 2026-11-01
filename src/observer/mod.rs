@@ -13,6 +13,7 @@ use std::{
 use tracing::warn;
 
 use crate::{
+    jsonrpc::{OTHER_METHOD, method_labels},
     observer::snapshot::{
         ATTEMPT_BOUNDS, BUCKET_BOUNDS_MICROS, HedgeSnapshot, HedgeStats, RequestSnapshot,
         RequestStats, Snapshot, UpstreamStats,
@@ -32,7 +33,13 @@ pub trait Observer: Send + Sync + 'static {
     fn record_hedge_win(&self, overtaken: &UpstreamId, to: &UpstreamId);
     fn record_coalesced(&self);
     /// Once per request that ran its own chain, however it ended.
-    fn record_request(&self, answered: bool, attempts: usize);
+    fn record_request(
+        &self,
+        method: &'static str,
+        answered: bool,
+        attempts: usize,
+        elapsed: Duration,
+    );
 }
 
 pub struct MetricsObserver {
@@ -41,7 +48,7 @@ pub struct MetricsObserver {
     /// never takes a lock.
     hedges: HashMap<(UpstreamId, UpstreamId), Arc<HedgeStats>>,
     coalesced: AtomicU64,
-    requests: RequestStats,
+    requests: HashMap<&'static str, RequestStats>,
 }
 
 impl MetricsObserver {
@@ -63,7 +70,9 @@ impl MetricsObserver {
             stats,
             hedges,
             coalesced: AtomicU64::new(0),
-            requests: RequestStats::default(),
+            requests: method_labels()
+                .map(|method| (method, RequestStats::default()))
+                .collect(),
         }
     }
 
@@ -113,8 +122,14 @@ impl MetricsObserver {
         self.coalesced.load(Ordering::Relaxed)
     }
 
-    pub fn requests(&self) -> RequestSnapshot {
-        self.requests.snapshot()
+    pub fn requests(&self) -> Vec<(&'static str, RequestSnapshot)> {
+        let mut out: Vec<_> = self
+            .requests
+            .iter()
+            .map(|(method, stat)| (*method, stat.snapshot()))
+            .collect();
+        out.sort_unstable_by_key(|(method, _)| *method);
+        out
     }
 
     pub fn snapshot_map(&self) -> HashMap<UpstreamId, Snapshot> {
@@ -143,22 +158,35 @@ impl Observer for MetricsObserver {
         self.coalesced.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn record_request(&self, answered: bool, attempts: usize) {
+    fn record_request(
+        &self,
+        method: &'static str,
+        answered: bool,
+        attempts: usize,
+        elapsed: Duration,
+    ) {
+        let Some(stat) = self
+            .requests
+            .get(method)
+            .or_else(|| self.requests.get(OTHER_METHOD))
+        else {
+            return;
+        };
         let outcome = if answered {
-            &self.requests.answered
+            &stat.answered
         } else {
-            &self.requests.failed
+            &stat.failed
         };
         outcome.fetch_add(1, Ordering::Relaxed);
 
         let attempts = attempts as u64;
-        self.requests
-            .attempts_total
-            .fetch_add(attempts, Ordering::Relaxed);
+        stat.attempts_total.fetch_add(attempts, Ordering::Relaxed);
         let bucket_idx = ATTEMPT_BOUNDS.partition_point(|&b| b < attempts);
-        if let Some(bucket) = self.requests.attempt_buckets.get(bucket_idx) {
+        if let Some(bucket) = stat.attempt_buckets.get(bucket_idx) {
             bucket.fetch_add(1, Ordering::Relaxed);
         }
+
+        record_duration(&stat.duration_buckets, &stat.duration_micros_total, elapsed);
     }
 
     fn record(&self, upstream: &UpstreamId, record: CallRecord<'_>) {
@@ -175,7 +203,8 @@ impl Observer for MetricsObserver {
         };
 
         counter.fetch_add(1, Ordering::Relaxed);
-        let duration_micros = record_duration(stat, record.duration);
+        let duration_micros =
+            record_duration(&stat.buckets, &stat.duration_micros_total, record.duration);
 
         if let Err(err) = &record.outcome
             && err.is_retryable()
@@ -192,21 +221,24 @@ impl Observer for MetricsObserver {
             return;
         };
         stat.abandoned.fetch_add(1, Ordering::Relaxed);
-        record_duration(stat, elapsed);
+        record_duration(&stat.buckets, &stat.duration_micros_total, elapsed);
     }
 }
 
-fn record_duration(stat: &UpstreamStats, duration: Duration) -> u64 {
+fn record_duration(
+    buckets: &[AtomicU64; BUCKET_BOUNDS_MICROS.len()],
+    total_micros: &AtomicU64,
+    duration: Duration,
+) -> u64 {
     let duration_micros = duration.as_micros() as u64;
 
-    stat.duration_micros_total
-        .fetch_add(duration_micros, Ordering::Relaxed);
+    total_micros.fetch_add(duration_micros, Ordering::Relaxed);
 
     // The slot of the first bound this duration is `le`. Anything past the
     // last bound gets no slot — `+Inf` covers it, derived at render.
     let bucket_idx = BUCKET_BOUNDS_MICROS.partition_point(|&b| b < duration_micros);
-    if bucket_idx < stat.buckets.len() {
-        stat.buckets[bucket_idx].fetch_add(1, Ordering::Relaxed);
+    if let Some(bucket) = buckets.get(bucket_idx) {
+        bucket.fetch_add(1, Ordering::Relaxed);
     }
     duration_micros
 }
@@ -484,21 +516,63 @@ mod tests {
     fn requests_are_counted_by_outcome_and_attempts() {
         let observer = create_observer();
 
-        observer.record_request(true, 1);
-        observer.record_request(true, 2);
-        observer.record_request(false, 3);
-        observer.record_request(false, 11);
+        observer.record_request("eth_call", true, 1, Duration::from_millis(40));
+        observer.record_request("eth_call", true, 2, Duration::from_millis(80));
+        observer.record_request("eth_call", false, 3, Duration::from_millis(300));
+        observer.record_request("eth_call", false, 11, Duration::from_secs(6));
 
         assert_eq!(
-            observer.requests(),
+            request_snapshot(&observer, "eth_call"),
             RequestSnapshot {
                 answered: 2,
                 failed: 2,
                 attempt_buckets: [1, 1, 1, 0, 0],
                 attempts_total: 17,
+                duration_buckets: [0, 0, 0, 1, 1, 0, 1, 0, 0, 0],
+                duration_micros_total: 6_420_000,
             },
-            "11 attempts is past the last bound: +Inf only"
+            "11 attempts and 6s are both past the last bound: +Inf only"
         );
+    }
+
+    #[test]
+    fn requests_are_counted_per_method() {
+        let observer = create_observer();
+
+        observer.record_request("eth_call", true, 1, Duration::from_millis(10));
+        observer.record_request("eth_getLogs", false, 2, Duration::from_millis(10));
+
+        assert_eq!(request_snapshot(&observer, "eth_call").answered, 1);
+        assert_eq!(request_snapshot(&observer, "eth_getLogs").failed, 1);
+        assert_eq!(
+            request_snapshot(&observer, "eth_blockNumber"),
+            RequestSnapshot::default()
+        );
+    }
+
+    #[test]
+    fn an_unknown_method_lands_on_other() {
+        let observer = create_observer();
+
+        observer.record_request("eth_madeUp", true, 1, Duration::from_millis(10));
+
+        assert_eq!(request_snapshot(&observer, OTHER_METHOD).answered, 1);
+        assert!(
+            observer
+                .requests()
+                .iter()
+                .all(|(method, _)| *method != "eth_madeUp"),
+            "the label set stays the one built up front"
+        );
+    }
+
+    fn request_snapshot(observer: &MetricsObserver, method: &str) -> RequestSnapshot {
+        observer
+            .requests()
+            .into_iter()
+            .find(|(label, _)| *label == method)
+            .map(|(_, snapshot)| snapshot)
+            .unwrap()
     }
 
     #[test]

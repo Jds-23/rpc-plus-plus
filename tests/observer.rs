@@ -36,6 +36,15 @@ fn observer(labels: &[&str]) -> (Vec<UpstreamId>, Arc<MetricsObserver>) {
     (ids, observer)
 }
 
+fn block_number_requests(observer: &MetricsObserver) -> RequestSnapshot {
+    observer
+        .requests()
+        .into_iter()
+        .find(|(method, _)| *method == "eth_blockNumber")
+        .map(|(_, snapshot)| snapshot)
+        .unwrap()
+}
+
 async fn post(addr: &str) -> reqwest::Response {
     reqwest::Client::new()
         .post(format!("{addr}/rpc"))
@@ -207,7 +216,11 @@ async fn every_follower_of_a_flight_is_counted_coalesced() {
 
     assert_eq!(slow.received_requests().await.unwrap().len(), 1);
     assert_eq!(observer.coalesced(), 4, "the leader made the call");
-    assert_eq!(observer.requests().answered, 1, "followers ran no chain");
+    assert_eq!(
+        block_number_requests(&observer).answered,
+        1,
+        "followers ran no chain"
+    );
 }
 
 #[tokio::test]
@@ -222,14 +235,14 @@ async fn a_failover_is_one_request_of_two_attempts() {
 
     assert_eq!(post(&addr).await.status(), 200);
 
+    let requests = block_number_requests(&observer);
+    assert_eq!((requests.answered, requests.failed), (1, 0));
+    assert_eq!(requests.attempt_buckets, [0, 1, 0, 0, 0]);
+    assert_eq!(requests.attempts_total, 2);
     assert_eq!(
-        observer.requests(),
-        RequestSnapshot {
-            answered: 1,
-            failed: 0,
-            attempt_buckets: [0, 1, 0, 0, 0],
-            attempts_total: 2,
-        }
+        requests.duration_buckets.iter().sum::<u64>(),
+        1,
+        "one request, timed once across both attempts"
     );
 }
 
@@ -241,7 +254,7 @@ async fn an_exhausted_chain_is_a_failed_request() {
 
     post(&addr).await;
 
-    let requests = observer.requests();
+    let requests = block_number_requests(&observer);
     assert_eq!((requests.answered, requests.failed), (0, 1));
 }
 

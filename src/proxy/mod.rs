@@ -18,7 +18,10 @@ use uuid::Uuid;
 
 use crate::{
     decider::Decider,
-    jsonrpc::{JSONRPC_INTERNAL_ERROR, Shape, dedup_key, is_write, readdress, request_id, shape},
+    jsonrpc::{
+        JSONRPC_INTERNAL_ERROR, Shape, dedup_key, is_write_method, method_label, readdress,
+        request_id, shape,
+    },
     observer::{Observer, snapshot::HedgeSnapshot},
     proxy::{
         attempt::try_once,
@@ -203,13 +206,18 @@ async fn run(
     body: Bytes,
     received_at: Instant,
 ) -> Reply {
-    let finished = match (core.dispatch, is_write(&body)) {
+    let method = method_label(&body);
+    let finished = match (core.dispatch, is_write_method(method)) {
         (Dispatch::Hedged, false) => core.race(&chain, &body).await,
         (Dispatch::Hedged, true) => core.send_once(&chain, &body).await,
         (Dispatch::Sequential, _) => core.walk(&chain, &body).await,
     };
-    core.observer
-        .record_request(finished.result.is_ok(), finished.tried.len());
+    core.observer.record_request(
+        method,
+        finished.result.is_ok(),
+        finished.tried.len(),
+        received_at.elapsed(),
+    );
     finish(finished, received_at)
 }
 
