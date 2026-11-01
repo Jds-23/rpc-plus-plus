@@ -4,7 +4,7 @@
 # 📝 docs  🎨 style  🔧 chore  📦 build  ⏪ revert
 # override: 🔒 security   🪵 logs/telemetry
 #
-# scopes: rpc route decider settings telemetry handler healthz startup tests docs deps
+# scopes: app config decider http jsonrpc observer proxy telemetry upstream tests docs deps
 #
 # body (optional, blank line first): why, not what
 #

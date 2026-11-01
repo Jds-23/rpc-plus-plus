@@ -40,7 +40,7 @@ Two sanctioned overrides — swap the emoji, keep the type:
 
 ## Scopes
 
-From `src/`: `app`, `config`, `decider`, `http`, `observer`, `proxy`, `telemetry`, `upstream`.
+From `src/`: `app`, `config`, `decider`, `http`, `jsonrpc`, `observer`, `proxy`, `telemetry`, `upstream`.
 Plus `tests`, `docs`, `deps`.
 
 ## Before / after
