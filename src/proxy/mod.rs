@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::{Instrument, Span, error, info, info_span, warn};
+use tracing::{Instrument, Span, error, info, info_span, instrument::Instrumented, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -164,10 +164,11 @@ impl Pipeline {
 
         let core = self.core.clone();
         let leader_body = body.clone();
-        let span = Span::current();
-        let (flight, role) = flights.join(key, me, move || {
-            core.start(leader_body, received_at).instrument(span)
-        });
+        let (flight, role) = flights.join(
+            key,
+            me,
+            in_current_span(move || core.start(leader_body, received_at)),
+        );
 
         match role {
             Role::Leader => flight.await,
@@ -307,13 +308,18 @@ impl Core {
             )
         })
         .await;
-        if let (1, Ok(Won { index, .. })) = (raced.hedge.won, &raced.result) {
+        if let Ok(Won {
+            index,
+            overtaken: Some(overtaken),
+            ..
+        }) = &raced.result
+        {
             self.observer
-                .record_hedge_win(chain[*index - 1].id(), chain[*index].id());
+                .record_hedge_win(overtaken.id(), chain[*index].id());
         }
 
         Finished {
-            result: raced.result.map(|Won { index, answer }| Answered {
+            result: raced.result.map(|Won { index, answer, .. }| Answered {
                 reply: answer,
                 upstream: chain[index].id(),
             }),
@@ -359,18 +365,13 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Reply {
     }
 }
 
-fn elapsed_ms(since: Instant) -> u64 {
-    since.elapsed().as_millis() as u64
+fn in_current_span<F: Future>(
+    make: impl FnOnce() -> F + Send + 'static,
+) -> impl FnOnce() -> Instrumented<F> + Send + 'static {
+    let span = Span::current();
+    move || make().instrument(span)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn static_send<F: Future + Send + 'static>(_: F) {}
-
-    #[allow(dead_code)]
-    fn run_can_be_a_flight(core: Arc<Core>) {
-        static_send(run(core, Vec::new(), Bytes::new(), Instant::now()));
-    }
+fn elapsed_ms(since: Instant) -> u64 {
+    since.elapsed().as_millis() as u64
 }

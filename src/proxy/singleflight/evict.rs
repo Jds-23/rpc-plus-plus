@@ -8,7 +8,7 @@ use std::{
 
 use futures_util::future::WeakShared;
 
-use super::{RequestId, Run};
+use super::{Flight, RequestId, Run};
 use crate::jsonrpc::DedupKey;
 
 pub(super) type Entries<T> = HashMap<DedupKey, Entry<T>>;
@@ -30,6 +30,28 @@ pub(super) struct Entry<T> {
     pub(super) id: FlightId,
     pub(super) leader: RequestId,
     pub(super) flight: WeakShared<Run<T>>,
+}
+
+pub(super) enum Slot<T> {
+    Live {
+        flight: Flight<T>,
+        leader: RequestId,
+    },
+    DeadAwaitingEvict,
+    Vacant,
+}
+
+pub(super) fn slot<T>(entries: &Entries<T>, key: &DedupKey) -> Slot<T> {
+    match entries.get(key) {
+        None => Slot::Vacant,
+        Some(entry) => match entry.flight.upgrade() {
+            Some(flight) => Slot::Live {
+                flight,
+                leader: entry.leader,
+            },
+            None => Slot::DeadAwaitingEvict,
+        },
+    }
 }
 
 pub(super) struct Evict<T> {

@@ -6,7 +6,7 @@ use futures_util::future::{BoxFuture, FutureExt, Shared};
 
 use super::RequestId;
 use crate::jsonrpc::DedupKey;
-use evict::{Entry, Evict, FlightIds, Inflight, lock};
+use evict::{Entry, Evict, FlightIds, Inflight, Slot, lock, slot};
 
 pub(super) type Run<T> = BoxFuture<'static, T>;
 
@@ -43,15 +43,9 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
         F: Future<Output = T> + Send + 'static,
     {
         let mut inflight = lock(&self.inflight);
-        if let Some(entry) = inflight.get(&key)
-            && let Some(flight) = entry.flight.upgrade()
-        {
-            return (
-                flight,
-                Role::Follower {
-                    leader: entry.leader,
-                },
-            );
+        match slot(&inflight, &key) {
+            Slot::Live { flight, leader } => return (flight, Role::Follower { leader }),
+            Slot::DeadAwaitingEvict | Slot::Vacant => {}
         }
 
         let id = self.ids.next();
