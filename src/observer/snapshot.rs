@@ -3,9 +3,25 @@ use std::{
     time::Duration,
 };
 
+use crate::upstream::DEFAULT_RPC_TIMEOUT_IN_SECS;
+
+const MICROS_PER_SEC: u64 = 1_000_000;
+
 pub const BUCKET_BOUNDS_MICROS: [u64; 10] = [
-    5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 3_000_000, 5_000_000,
+    5_000,
+    10_000,
+    25_000,
+    50_000,
+    100_000,
+    250_000,
+    500_000,
+    MICROS_PER_SEC,
+    DEFAULT_RPC_TIMEOUT_IN_SECS * MICROS_PER_SEC,
+    5 * MICROS_PER_SEC,
 ];
+
+const _: () = assert!(BUCKET_BOUNDS_MICROS[7] < BUCKET_BOUNDS_MICROS[8]);
+const _: () = assert!(BUCKET_BOUNDS_MICROS[8] < BUCKET_BOUNDS_MICROS[9]);
 
 #[derive(Default)]
 pub struct UpstreamStats {
