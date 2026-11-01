@@ -255,7 +255,6 @@ fn validate_settings(settings: &Settings) -> Result<(), SettingsError> {
             Some(millis) => millis,
             None => proxy.hedge.after_in_millis,
         };
-        // Allowed, but the timeout fires first so this upstream never hedges.
         if hedge_after_in_millis >= rpc_timeout_in_millis {
             tracing::warn!(
                 event = "hedge_after_unreachable",
@@ -341,7 +340,6 @@ mod tests {
     use super::*;
     use config::{File, FileFormat};
 
-    /// Only the two required keys, so every optional falls through to its default.
     const MINIMAL: &str = r#"
 upstreams:
   - label: one
@@ -491,7 +489,6 @@ application:
         assert!(error.contains("decider"), "{error}");
     }
 
-    /// The default must not be sticky: a container has to be able to widen it.
     #[test]
     fn an_explicit_host_overrides_the_loopback_default() {
         let yaml = format!("{MINIMAL}  host: 0.0.0.0\n");
@@ -623,7 +620,6 @@ application:
         assert!(error.contains("duplicate label one"), "{error}");
     }
 
-    /// The two labels identify the offending entries; the shared URL holds the key.
     #[test]
     fn a_duplicate_url_names_both_labels_and_neither_url() {
         let yaml = upstreams(&[

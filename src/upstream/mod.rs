@@ -18,8 +18,6 @@ use crate::{
 const DEFAULT_RPC_TIMEOUT_IN_SECS: u64 = 3;
 const DEFAULT_HEDGE_AFTER_IN_MILLIS: u64 = 250;
 
-/// Pool knobs for the one shared client. Idle caps are per-host, and every
-/// upstream shares this pool once `Upstream` stops building its own.
 const POOL_MAX_IDLE_PER_HOST: usize = 32;
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -171,8 +169,6 @@ impl Upstream {
     }
 }
 
-// TODO: refactor this API — it takes loose settings pieces and silently skips
-// upstreams that fail to build.
 pub fn build_all<I>(upstreams: I, http: reqwest::Client, proxy: &ProxySettings) -> Vec<Upstream>
 where
     I: IntoIterator<Item = UpstreamSettings>,

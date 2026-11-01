@@ -45,8 +45,6 @@ impl RankingRefresher {
             .expect("seeded at construction and trimmed only after a push");
         let current_ranking = self.decider.ranking.load_full();
 
-        // The front snapshot is one tick old per entry held, so the deque's depth
-        // is the span this diff covers.
         let window_secs = self.baseline.len() as u64 * self.interval.as_secs();
         let want_secs = self.window_ticks as u64 * self.interval.as_secs();
         if self.baseline.len() < self.window_ticks {
@@ -67,7 +65,6 @@ impl RankingRefresher {
             .iter()
             .map(|upstream| {
                 let id = upstream.id();
-                // `spawn` refuses an upstream the observer does not track, and the
                 let Some(window) = current
                     .get(id)
                     .zip(baseline.get(id))
@@ -78,8 +75,6 @@ impl RankingRefresher {
                 };
 
                 let key = if window.answered() < self.min_samples {
-                    // A starved upstream rates a perfect 0.0, which would unseat a
-                    // proven one on no evidence.
                     SortKey::unscored()
                 } else if incumbent == Some(id) {
                     SortKey::scored(window.error_rate() * self.margin)
@@ -171,8 +166,6 @@ mod tests {
         upstream::call::{CallError, CallRecord},
     };
 
-    /// Builds the refresher by hand rather than through `spawn`, so the ranking
-    /// can be driven with no runtime, no ticker and no clock.
     fn harness(
         labels: &[&str],
     ) -> (
@@ -264,8 +257,6 @@ mod tests {
         assert_eq!(order(&decider), ["b", "a"]);
     }
 
-    /// The property that separates this decider from one scoring lifetime totals:
-    /// `a` carries the worse record overall but owns the latest window.
     #[test]
     fn ranks_on_the_window_not_lifetime() {
         let (mut refresher, decider, observer) = harness(&["a", "b"]);
@@ -282,8 +273,6 @@ mod tests {
         assert_eq!(order(&decider), ["a", "b"], "a never recovered");
     }
 
-    /// The baseline advances every tick, so a quiet window is a clean slate rather
-    /// than a re-run of the last one.
     #[test]
     fn a_bad_window_is_not_punished_twice() {
         let (mut refresher, decider, observer) = harness(&["a", "b"]);
@@ -298,8 +287,6 @@ mod tests {
         assert_eq!(order(&decider), ["a", "b"]);
     }
 
-    /// The head takes nearly every request, so a challenger can sit at zero traffic
-    /// and rate a perfect 0.0. Ranking on that would swap the two every tick.
     #[test]
     fn an_idle_challenger_does_not_take_the_head() {
         let (mut refresher, decider, observer) = harness(&["head", "idle"]);
@@ -316,8 +303,6 @@ mod tests {
 
     #[test]
     fn a_challenger_must_beat_the_incumbent_by_the_margin() {
-        // 9% against the incumbent's 10% clears the raw comparison but not the 20%
-        // margin, so the head holds.
         let (mut refresher, decider, observer) = harness(&["head", "rival"]);
         record(&observer, "head", 90, 10);
         record(&observer, "rival", 91, 9);
@@ -328,7 +313,6 @@ mod tests {
             "a 1pp gap swapped the head"
         );
 
-        // 5% against 10% clears it.
         let (mut refresher, decider, observer) = harness(&["head", "rival"]);
         record(&observer, "head", 90, 10);
         record(&observer, "rival", 95, 5);
@@ -367,8 +351,6 @@ mod tests {
         assert_eq!(order(&decider), ["a", "b"], "a tie reordered");
     }
 
-    /// Regression: trimming on `==` never fired for a single-tick window, so the
-    /// baseline froze at construction and the deque grew without bound.
     #[test]
     fn a_single_tick_window_keeps_one_baseline() {
         let (mut refresher, _decider, observer) = harness_windowed(&["a"], 1);
@@ -380,19 +362,15 @@ mod tests {
         }
     }
 
-    /// A three-tick window ranks on three intervals of history, not one.
     #[test]
     fn the_baseline_spans_the_configured_window() {
         let (mut refresher, decider, observer) = harness_windowed(&["a", "b"], 3);
 
-        // Tick 1: `a` is the worse of the two.
         record(&observer, "a", 0, 40);
         record(&observer, "b", 40, 0);
         refresher.refresh();
         assert_eq!(order(&decider), ["b", "a"]);
 
-        // Two clean ticks for `a`. A one-tick window would already have promoted
-        // it; across three ticks its earlier failures still count against it.
         for _ in 0..2 {
             record(&observer, "a", 40, 0);
             refresher.refresh();

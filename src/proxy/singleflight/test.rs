@@ -18,7 +18,6 @@ const LATENCY: Duration = Duration::from_millis(100);
 
 type Answer = Result<&'static str, &'static str>;
 
-/// Stands in for a request's run: counts runs, sleeps `LATENCY`, answers.
 #[derive(Default)]
 struct Fake {
     entered: AtomicUsize,

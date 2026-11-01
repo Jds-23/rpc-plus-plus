@@ -226,7 +226,6 @@ impl PrometheusCollector for Collector {
     }
 }
 
-/// `upstream` is the one overtaken, `to` the one hedged to.
 fn pair_desc(name: &str, help: &str) -> prometheus::Result<Desc> {
     Desc::new(
         name.to_string(),
@@ -381,12 +380,7 @@ fn counter_metric(upstream: &str, outcome: &str, value: u64) -> Metric {
             ..Default::default()
         }
         .into(),
-        ..Default::default() // gauge: (),
-                             // summary: (),
-                             // untyped: (),
-                             // histogram: (),
-                             // timestamp_ms: (),
-                             // special_fields: (),
+        ..Default::default()
     }
 }
 
@@ -428,8 +422,6 @@ rpc_attempts_total{outcome="rpc_error",upstream="zulu"} 0
 rpc_attempts_total{outcome="abandoned",upstream="zulu"} 0
 "#;
 
-    /// One 100ms attempt: `BUCKET_BOUNDS_MICROS` in seconds, cumulative from the
-    /// slot it landed in, and a `+Inf` line the collector never emitted.
     const EXPECTED_DURATION: &str = r#"# HELP rpc_attempt_duration_seconds Rpc attempt duration in seconds
 # TYPE rpc_attempt_duration_seconds histogram
 rpc_attempt_duration_seconds_bucket{upstream="alpha",le="0.005"} 0
@@ -447,7 +439,6 @@ rpc_attempt_duration_seconds_sum{upstream="alpha"} 0.1
 rpc_attempt_duration_seconds_count{upstream="alpha"} 1
 "#;
 
-    /// One family at a time: each test asserts its own metric's exposition.
     fn encode(families: &[MetricFamily], name: &str) -> String {
         let wanted: Vec<MetricFamily> = families
             .iter()
@@ -498,8 +489,6 @@ rpc_attempt_duration_seconds_count{upstream="alpha"} 1
             );
         }
 
-        // A rate limit arriving on an HTTP 200. It must land on its own series,
-        // not on `success`.
         let rpc_error = CallError::RpcError {
             http_status: StatusCode::OK,
             code: -32005,
@@ -527,7 +516,6 @@ rpc_attempt_duration_seconds_count{upstream="alpha"} 1
         assert!(collector.collect().is_empty());
     }
 
-    /// `upstream` is the slow one, `to` the one that stepped in.
     const EXPECTED_HEDGES: &str = r#"# HELP rpc_hedges_total Hedge calls started because this upstream passed its hedge_after, by the upstream hedged to
 # TYPE rpc_hedges_total counter
 rpc_hedges_total{upstream="alpha",to="zulu"} 2
@@ -622,7 +610,6 @@ rpc_requests_total{method="other",outcome="success"} 0
 rpc_requests_total{method="other",outcome="failed"} 1
 "#;
 
-    /// One request per path: answered first try, failed over once, exhausted 3.
     const EXPECTED_REQUEST_ATTEMPTS: &str = r#"# HELP rpc_request_attempts Upstream attempts per request, hedges included; above 1 means failover or a hedge
 # TYPE rpc_request_attempts histogram
 rpc_request_attempts_bucket{method="eth_call",le="1"} 1
@@ -744,7 +731,7 @@ rpc_request_duration_seconds_count{method="other"} 1
             &alpha,
             CallRecord {
                 outcome: Err(&unreachable),
-                duration: Duration::from_secs(6), // past the 5.0 ceiling
+                duration: Duration::from_secs(6),
             },
         );
 

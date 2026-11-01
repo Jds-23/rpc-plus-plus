@@ -12,23 +12,12 @@ use crate::{
     upstream::Upstream,
 };
 
-// Known gaps, carried in docs/design/v0.2-DECIDER.md under Known Bugs:
-//
-// - `rank` on `attempt_started` (`src/proxy.rs`) — the 0-indexed chain position, so
-//   first-choice hit rate is one filter rather than a join.
-// - `refresh`, `window_ticks`, `min_samples` and `margin` belong in settings
-//   (`src/settings.rs`) rather than in parameters and constants.
-// - JSON-RPC errors riding on HTTP 200 count as successes (`src/observer.rs`), so a
-//   `-32005` rate limit reads here as perfect health.
-
 pub const REFRESH_DEFAULT: Duration = Duration::from_secs(15);
 
 pub const WINDOW_DEFAULT: usize = 4;
 
-/// A window carrying fewer calls than this is noise, not signal.
 const MIN_WINDOW_SAMPLES: u64 = 20;
 
-/// A challenger has to be 20% better than the incumbent head to take its place.
 const PROMOTION_MARGIN: f64 = 0.8;
 
 pub struct PreferLeastErrors {
@@ -176,7 +165,6 @@ mod tests {
         assert_eq!(tasks.len(), 0, "a rejected build should spawn nothing");
     }
 
-    /// Without this the upstream would score off a map that does not hold it.
     #[tokio::test]
     async fn spawn_rejects_an_upstream_the_observer_does_not_track() {
         let mut tasks: JoinSet<()> = JoinSet::new();

@@ -16,11 +16,8 @@ use crate::common::{mock_rpc_server, rpc, spawn_app_with_observer, test_settings
 
 mod common;
 
-/// Nothing listens here, so the call fails before a response exists.
 const DEAD_URL: &str = "http://127.0.0.1:1";
 
-/// Every upstream gets a turn, and `retry_after` is zeroed so the loop does not
-/// sleep between attempts.
 fn settings(upstreams: Vec<UpstreamSettings>) -> Settings {
     let mut settings = test_settings(upstreams);
     settings.application.proxy.max_attempt = settings.upstreams.len() as u64;
@@ -28,8 +25,6 @@ fn settings(upstreams: Vec<UpstreamSettings>) -> Settings {
     settings
 }
 
-/// `MetricsObserver` only counts upstreams it was built with, so the ids come
-/// back alongside it to read the stats out again.
 fn observer(labels: &[&str]) -> (Vec<UpstreamId>, Arc<MetricsObserver>) {
     let ids: Vec<UpstreamId> = labels.iter().copied().map(UpstreamId::new).collect();
     let observer = Arc::new(MetricsObserver::new(ids.clone()));
@@ -54,8 +49,6 @@ async fn post(addr: &str) -> reqwest::Response {
         .unwrap()
 }
 
-/// Counters carry no ordering, so what is asserted is the split: the failure
-/// lands on the upstream that produced it and never on its replacement.
 #[tokio::test]
 async fn each_upstream_counts_its_own_outcome() {
     let live = mock_rpc_server::ok("0x1").await;
@@ -82,8 +75,6 @@ async fn each_upstream_counts_its_own_outcome() {
     assert_eq!(live.error_status, 0);
 }
 
-/// The snapshot classes a failure without keeping its code, so the 500 itself is
-/// only visible in the error the client gets back.
 #[tokio::test]
 async fn an_error_status_lands_in_the_error_status_counter() {
     let failing = mock_rpc_server::failing(StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -128,9 +119,6 @@ async fn recorded_duration_stays_within_the_request() {
     );
 }
 
-/// A rate limit arrives as HTTP 200 with a JSON-RPC `error` member. Until the
-/// body was decoded this read as a clean success, which is what left the ranking
-/// blind to a throttled provider.
 #[tokio::test]
 async fn a_json_rpc_error_on_a_200_is_not_a_success() {
     let limited = mock_rpc_server::rpc_erroring(-32005, "limit exceeded").await;
@@ -151,8 +139,6 @@ async fn a_json_rpc_error_on_a_200_is_not_a_success() {
     assert_eq!(stats.read_failed, 0);
 }
 
-/// Both counters land on the pair: the slow upstream that ran past its
-/// `hedge_after`, and the one the hedge went to.
 #[tokio::test]
 async fn a_hedge_and_its_win_land_on_the_overtaken_pair() {
     let slow = mock_rpc_server::slow("0xa", std::time::Duration::from_millis(500)).await;

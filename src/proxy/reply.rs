@@ -6,8 +6,6 @@ use reqwest::{StatusCode, header};
 
 use crate::jsonrpc::rpc_error_body;
 
-/// What a request answered, in a form every caller can hold. A `Response` body
-/// reads once; `Bytes::clone` is a refcount bump.
 #[derive(Debug, Clone)]
 pub(crate) struct Reply {
     pub http_status: StatusCode,

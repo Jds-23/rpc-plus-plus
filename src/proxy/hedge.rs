@@ -9,13 +9,8 @@ use crate::{
     upstream::{Upstream, call::CallError},
 };
 
-/// Which call the racer is starting, and why.
 pub(super) struct Start<'a> {
     pub index: usize,
-    /// `Some` when the timer started it: the upstream that ran past its
-    /// `hedge_after`, always the one just before it in the chain, since the
-    /// timer only ever waits on the latest start. `None` for the first call and
-    /// for a retry pulled in by a failure.
     pub overtaken: Option<&'a Upstream>,
 }
 
@@ -24,25 +19,12 @@ pub(super) struct Won<T> {
     pub answer: T,
 }
 
-/// What a race did, not just what it answered.
 pub(super) struct Raced<T> {
     pub result: Result<Won<T>, Failure>,
-    /// Calls started, hedges included. Always a prefix of the chain.
     pub started: usize,
-    /// For this one race: `won` is 1 when a hedge answered first, else 0.
     pub hedge: HedgeSnapshot,
 }
 
-/// Races `chain`, staggered by each upstream's `hedge_after`.
-///
-/// The first `Ok` wins and everything still in flight is dropped. A retryable
-/// failure starts the next upstream at once; a final one ends the race. When
-/// the latest call has not answered within its `hedge_after`, the next one is
-/// started beside it — only that counts as a hedge. Whether a request may be
-/// raced at all is the caller's call; this always races.
-///
-/// Polled on the caller's task: the calls borrow the chain and never need
-/// `'static`.
 pub(super) async fn race<'a, T, F, Fut>(
     chain: &'a [Arc<Upstream>],
     max_attempt: usize,
@@ -81,8 +63,6 @@ where
                 hedge,
             };
         }
-        // Rebuilt every pass on purpose: patience runs from the latest start,
-        // so a failure that pulls the next upstream in also restarts the clock.
         let hedge_after = chain[next - 1].hedge_after();
 
         tokio::select! {
@@ -138,9 +118,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum Verdict {
         Succeeds,
-        /// Retryable: the next upstream may do better.
         Fails,
-        /// Not retryable: every upstream would answer the same.
         Final,
     }
 
@@ -173,8 +151,6 @@ mod tests {
 
     const NAMES: [&str; 3] = ["first", "second", "third"];
 
-    /// One upstream per lane, `(latency_ms, verdict)`, all sharing `hedge_after`.
-    /// The upstreams are never called; `Fake` stands in for the HTTP.
     fn chain(lanes: &[(u64, Verdict)], hedge_after: u64) -> (Vec<Arc<Upstream>>, Vec<Fake>) {
         lanes
             .iter()

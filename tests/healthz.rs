@@ -4,8 +4,6 @@ use crate::common::{rpc, spawn_app, test_settings};
 
 mod common;
 
-/// Nothing listens here: `/healthz` reports that the process is up, not that any
-/// upstream is reachable.
 const DEAD_URL: &str = "http://127.0.0.1:1/";
 
 #[tokio::test]
