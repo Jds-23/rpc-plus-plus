@@ -80,9 +80,10 @@ impl CallError {
 
 /// `reqwest::Error`'s own `Display` stops at `error sending request`, which names
 /// no cause. Walking `source()` yields the transport frame that actually failed.
-pub(super) fn error_chain(err: &dyn std::error::Error) -> String {
+pub(super) fn error_chain(err: reqwest::Error) -> String {
+    let err = err.without_url();
     let mut out = err.to_string();
-    let mut source = err.source();
+    let mut source = std::error::Error::source(&err);
     while let Some(cause) = source {
         out.push_str(": ");
         out.push_str(&cause.to_string());
