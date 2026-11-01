@@ -92,8 +92,11 @@ Grafana opens on the provisioned **rpc-plus-plus** dashboard without a login (an
 |---|---|
 | Request rate, requests by outcome | `rpc_requests_total{method,outcome}` + `rpc_requests_coalesced_total` |
 | Attempts by outcome | `rpc_attempts_total{outcome,upstream}` |
+| Request duration p50 / p95 / p99, p95 by method | `rpc_request_duration_seconds` |
+| Requests by method, failure ratio by method | `rpc_requests_total{method,outcome}` |
 | p50 / p95 / p99 per upstream | `rpc_attempt_duration_seconds` |
 | Error rate by upstream | failed answers over all answers in `rpc_attempts_total`; abandoned calls left out |
+| Attempt errors by kind | `rpc_attempts_total` by `upstream` and failed `outcome` |
 | Failover | `rpc_request_attempts`: requests that took more than one attempt |
 | Hedges, hedge win rate | `rpc_hedges_total`, `rpc_hedge_wins_total` by overtaken `upstream` |
 
