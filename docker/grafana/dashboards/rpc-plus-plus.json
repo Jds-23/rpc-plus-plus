@@ -794,7 +794,7 @@
       "gridPos": {
         "x": 0,
         "y": 23,
-        "w": 12,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
@@ -844,6 +844,66 @@
       ]
     },
     {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Attempt errors by kind",
+      "description": "Failed attempts per second, split by upstream and what went wrong: unreachable, read_failed, error_status (HTTP), rpc_error (JSON-RPC error body).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 23,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (upstream, outcome) (rate(rpc_attempts_total{upstream=~\"$upstream\",outcome!~\"success|abandoned\"}[$__rate_interval])) > 0",
+          "legendFormat": "{{upstream}} · {{outcome}}",
+          "refId": "A",
+          "range": true
+        }
+      ]
+    },
+    {
       "id": 14,
       "type": "timeseries",
       "title": "Failover",
@@ -853,9 +913,9 @@
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 12,
+        "x": 16,
         "y": 23,
-        "w": 12,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
