@@ -68,16 +68,11 @@ impl CallError {
 
     pub fn is_retryable(&self) -> bool {
         match self {
-            // No response arrived. A different upstream is a different connection.
             CallError::Unreachable { .. } => true,
-            // The body died mid-read; the same request may land fine on a peer.
             CallError::ReadFailed { .. } => true,
-            // 429 and 5xx are the upstream's problem. A 4xx is the caller's, and
-            // every upstream will answer it the same way.
             CallError::ErrorStatus { http_status } => {
                 *http_status == StatusCode::TOO_MANY_REQUESTS || http_status.is_server_error()
             }
-            // Already decided by the error code, in `jsonrpc::is_retryable`.
             CallError::RpcError { retryable, .. } => *retryable,
         }
     }
@@ -85,10 +80,6 @@ impl CallError {
 
 /// `reqwest::Error`'s own `Display` stops at `error sending request`, which names
 /// no cause. Walking `source()` yields the transport frame that actually failed.
-///
-/// Only ever called on an error already passed through `without_url`; the
-/// remaining frames are transport-level and carry no path, which is where the API
-/// key lives.
 pub(super) fn error_chain(err: &dyn std::error::Error) -> String {
     let mut out = err.to_string();
     let mut source = err.source();

@@ -65,12 +65,9 @@ pub(crate) fn rpc_fault_in(body: &Bytes) -> Option<RpcFault> {
 
 fn is_retryable(code: i64, message: &[u8]) -> bool {
     match code {
-        // rate limited, resource unavailable, upstream's own internal error
         -32005 | -32002 | -32603 => true,
         // geth's catch-all. A revert is deterministic — every upstream reverts it.
         -32000 => REVERTED.find(message).is_none(),
-        // -32700/-32600/-32601/-32602/-32003: the request is wrong. Retrying re-sends
-        // the same wrong request to a fresh upstream and burns an attempt.
         _ => false,
     }
 }
@@ -85,7 +82,6 @@ pub(crate) fn is_write_method(method: &str) -> bool {
     !is_idempotent_read(method)
 }
 
-// No byte prefilter: a skip can't prove `method` exists, and misses `\u` escapes.
 pub(crate) fn method_label(body: &Bytes) -> &'static str {
     let Ok(envelope) = serde_json::from_slice::<MethodEnvelope>(body) else {
         return OTHER_METHOD;
@@ -113,7 +109,6 @@ const SENDS: &[&str] = &[
     "eth_sendPrivateTransaction",
 ];
 
-// An allowlist, so an unknown write fails closed: a missing read is only treated as a write.
 // Filters are out on purpose — each node keeps its own, and polling one consumes it.
 const IDEMPOTENT_READS: &[&str] = &[
     "eth_blockNumber",
@@ -157,18 +152,11 @@ fn is_idempotent_read(method: &str) -> bool {
     IDEMPOTENT_READS.contains(&method)
 }
 
-/// What a flight is keyed by: the question, not the caller's envelope (`id`, `jsonrpc`).
-///
-/// 128 bits, not 64: a collision merges two questions and serves one caller the other's answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct DedupKey(u128);
 
-/// `None` = send it on its own: writes, unknown methods, batches, malformed bodies.
-///
-/// Hashed from the parsed value, so whitespace never splits a key. Array order is kept —
-/// params are positional. Object keys are sorted: `Map` is a `BTreeMap` without
-/// `preserve_order`. A missing `params` asks the same question as `[]`. The quoted method
-/// string delimits itself, so method and params need no separator.
+/// Object keys are sorted: `Map` is a `BTreeMap` without
+/// `preserve_order`.
 pub(crate) fn dedup_key(body: &Bytes) -> Option<DedupKey> {
     let Value::Object(mut request) = serde_json::from_slice(body).ok()? else {
         return None;
@@ -189,7 +177,6 @@ pub(crate) fn dedup_key(body: &Bytes) -> Option<DedupKey> {
     Some(DedupKey(hasher.0.digest128()))
 }
 
-// Serializes straight into the hasher: no key string is ever allocated.
 struct Xxh3Writer(Xxh3);
 
 impl io::Write for Xxh3Writer {
@@ -231,8 +218,6 @@ pub(crate) fn request_id(body: &Bytes) -> Option<Box<RawValue>> {
     envelope.id.map(RawValue::to_owned)
 }
 
-/// Swaps in `id` and leaves every other field byte for byte: via `Value`, keys
-/// come back sorted and numbers reformatted.
 pub(crate) fn readdress(body: &Bytes, id: &RawValue) -> Option<Bytes> {
     let mut envelope: BTreeMap<&str, &RawValue> = serde_json::from_slice(body).ok()?;
     envelope.insert("id", id);

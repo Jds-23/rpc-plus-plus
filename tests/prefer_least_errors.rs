@@ -13,9 +13,6 @@ use crate::common::{
 
 mod common;
 
-/// The ranking itself is covered by unit tests against `refresh`. What only an
-/// integration test can show is that the observer the proxy records into is the
-/// one the refresher scores from — a second instance would read zeros forever.
 #[tokio::test]
 async fn the_decider_scores_from_the_observer_the_proxy_writes_to() {
     let healthy = mock_rpc_server::ok("0xa").await;

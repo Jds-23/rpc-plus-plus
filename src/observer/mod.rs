@@ -44,8 +44,6 @@ pub trait Observer: Send + Sync + 'static {
 
 pub struct MetricsObserver {
     stats: HashMap<UpstreamId, Arc<UpstreamStats>>,
-    /// Keyed `(overtaken, to)`. Every ordered pair exists up front, so recording
-    /// never takes a lock.
     hedges: HashMap<(UpstreamId, UpstreamId), Arc<HedgeStats>>,
     coalesced: AtomicU64,
     requests: HashMap<&'static str, RequestStats>,
@@ -234,8 +232,6 @@ fn record_duration(
 
     total_micros.fetch_add(duration_micros, Ordering::Relaxed);
 
-    // The slot of the first bound this duration is `le`. Anything past the
-    // last bound gets no slot — `+Inf` covers it, derived at render.
     let bucket_idx = BUCKET_BOUNDS_MICROS.partition_point(|&b| b < duration_micros);
     if let Some(bucket) = buckets.get(bucket_idx) {
         bucket.fetch_add(1, Ordering::Relaxed);
@@ -256,8 +252,6 @@ mod tests {
         Arc::new(MetricsObserver::new(upstreams))
     }
 
-    /// Built out of order on purpose: `HashMap` iteration is randomised per
-    /// process, so an unsorted scrape would pass some runs and reorder others.
     #[test]
     fn test_snapshots_are_sorted_by_label() {
         let observer = MetricsObserver::new(vec![
@@ -282,18 +276,16 @@ mod tests {
 
         let record = CallRecord {
             outcome: Ok(StatusCode::OK),
-            duration: Duration::from_micros(100_000), // 100ms
+            duration: Duration::from_micros(100_000),
         };
 
         observer.record(&upstream_id, record);
 
         let stats = observer.stats.get(&upstream_id).unwrap();
         assert_eq!(stats.success.load(Ordering::Relaxed), 1);
-        assert_eq!(stats.buckets[4].load(Ordering::Relaxed), 1); // 100_000 bucket
+        assert_eq!(stats.buckets[4].load(Ordering::Relaxed), 1);
     }
 
-    /// Slots hold the count that fell into that band alone, not the running
-    /// `le` total — accumulating into cumulative form is the exposition's job.
     #[tokio::test]
     async fn test_record_lands_in_exactly_one_bucket() {
         let observer = create_observer();
@@ -301,7 +293,7 @@ mod tests {
 
         let record = CallRecord {
             outcome: Ok(StatusCode::OK),
-            duration: Duration::from_micros(50_000), // the bound at index 3
+            duration: Duration::from_micros(50_000),
         };
 
         observer.record(&upstream_id, record);
@@ -346,7 +338,6 @@ mod tests {
         let stats = observer.stats.get(&upstream_id).unwrap();
         assert_eq!(stats.success.load(Ordering::Relaxed), 100);
 
-        // 91_000..=100_000 all sit in the one (50_000, 100_000] slot.
         assert_eq!(stats.buckets[4].load(Ordering::Relaxed), 100);
     }
 
@@ -376,7 +367,6 @@ mod tests {
             handle.await.unwrap();
         }
 
-        // Each upstream got 25 records
         for upstream_id in upstreams {
             let stats = observer.stats.get(&upstream_id).unwrap();
             assert_eq!(stats.success.load(Ordering::Relaxed), 25);
@@ -596,7 +586,7 @@ mod tests {
         let observer = create_observer();
         let upstream_id = UpstreamId::new("upstream-1");
 
-        let durations = vec![100_000, 50_000, 200_000, 75_000]; // micros
+        let durations = vec![100_000, 50_000, 200_000, 75_000];
 
         for duration_micros in &durations {
             let record = CallRecord {

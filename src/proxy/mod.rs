@@ -55,7 +55,6 @@ pub struct Pipeline {
     flights: Option<SingleFlight<Reply>>,
 }
 
-/// The pipeline's state, shareable so a request's run can own it (`'static`).
 struct Core {
     observer: Arc<dyn Observer>,
     decider: Arc<dyn Decider>,
@@ -71,12 +70,9 @@ pub enum Dispatch {
     Hedged,
 }
 
-/// How a request ended, whichever path ran it.
 struct Finished<'c> {
     result: Result<Answered<'c>, Failure>,
     tried: Vec<&'c UpstreamId>,
-    /// For this one request: `won` is 1 when a hedge answered first, else 0.
-    /// `None` under `Dispatch::Sequential`.
     hedge: Option<HedgeSnapshot>,
 }
 
@@ -155,8 +151,6 @@ impl Pipeline {
         }
     }
 
-    /// Joins the flight for this request's question, or leads it. A write, an
-    /// unknown method or a notification runs on its own.
     async fn coalesce(
         &self,
         flights: &SingleFlight<Reply>,
@@ -168,8 +162,6 @@ impl Pipeline {
             return self.core.start(body, received_at).await;
         };
 
-        // Instrumented here, so the flight logs under the leader's span
-        // whichever caller ends up polling it.
         let core = self.core.clone();
         let leader_body = body.clone();
         let span = Span::current();
@@ -178,7 +170,6 @@ impl Pipeline {
         });
 
         match role {
-            // The upstream answered the leader's own body: its id is already right.
             Role::Leader => flight.await,
             Role::Follower { leader } => {
                 info!(event = "request_coalesced", leader_request_id = %leader);
@@ -198,8 +189,6 @@ impl Pipeline {
     }
 }
 
-/// One request, start to finish. Owns everything it touches, so it can run as
-/// a flight that outlives the caller who started it.
 async fn run(
     core: Arc<Core>,
     chain: Vec<Arc<Upstream>>,
@@ -222,7 +211,6 @@ async fn run(
 }
 
 impl Core {
-    /// The chain is decided here, so a follower never advances the decider.
     fn start(
         self: &Arc<Self>,
         body: Bytes,
@@ -232,7 +220,6 @@ impl Core {
         run(self.clone(), chain, body, received_at)
     }
 
-    /// One upstream at a time, `retry_after` between them.
     async fn walk<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
         let mut tried: Vec<&UpstreamId> = Vec::with_capacity(chain.len());
 
@@ -283,9 +270,6 @@ impl Core {
         }
     }
 
-    /// A write under `Dispatch::Hedged`: the head of the chain and nothing else.
-    /// The first send may land even when it reports failure, so a second call
-    /// risks a double send.
     async fn send_once<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
         let no_hedge = HedgeSnapshot { started: 0, won: 0 };
         let Some(upstream) = chain.first() else {
@@ -309,7 +293,6 @@ impl Core {
         }
     }
 
-    /// Staggered race over the chain. Reads only; writes go to `send_once`.
     async fn race<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
         let raced = race(chain, self.max_attempt, |upstream, start| {
             if let Some(overtaken) = start.overtaken {
@@ -324,7 +307,6 @@ impl Core {
             )
         })
         .await;
-        // A hedge always overtakes the upstream just before it (see `Start`).
         if let (1, Ok(Won { index, .. })) = (raced.hedge.won, &raced.result) {
             self.observer
                 .record_hedge_win(chain[*index - 1].id(), chain[*index].id());
@@ -387,7 +369,6 @@ mod tests {
 
     fn static_send<F: Future + Send + 'static>(_: F) {}
 
-    // Never called: it compiles only while `run` is `Send + 'static`.
     #[allow(dead_code)]
     fn run_can_be_a_flight(core: Arc<Core>) {
         static_send(run(core, Vec::new(), Bytes::new(), Instant::now()));

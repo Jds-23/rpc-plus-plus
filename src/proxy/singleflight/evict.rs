@@ -14,7 +14,6 @@ use crate::jsonrpc::DedupKey;
 pub(super) type Entries<T> = HashMap<DedupKey, Entry<T>>;
 pub(super) type Inflight<T> = Arc<Mutex<Entries<T>>>;
 
-/// Which flight this is, for `Evict`. Only `FlightIds` mints one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct FlightId(u64);
 
@@ -30,12 +29,9 @@ impl FlightIds {
 pub(super) struct Entry<T> {
     pub(super) id: FlightId,
     pub(super) leader: RequestId,
-    /// Weak on purpose: the map alone must never keep a run alive.
     pub(super) flight: WeakShared<Run<T>>,
 }
 
-/// Rides inside the flight, so the entry leaves the map however the flight
-/// ends: answered, failed, or dropped by every caller.
 pub(super) struct Evict<T> {
     pub(super) inflight: Inflight<T>,
     pub(super) key: DedupKey,

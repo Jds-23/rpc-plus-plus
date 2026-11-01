@@ -10,8 +10,6 @@ use evict::{Entry, Evict, FlightIds, Inflight, lock};
 
 pub(super) type Run<T> = BoxFuture<'static, T>;
 
-/// One request's run, awaited by every caller that asked the same question.
-/// Whoever is still polling drives it; the last drop cancels it.
 pub(super) type Flight<T> = Shared<Run<T>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,10 +33,6 @@ impl<T> Default for SingleFlight<T> {
 }
 
 impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
-    /// Joins the live flight for `key`, or starts `make()` as a new one led by
-    /// `me`. `make` runs only for the leader.
-    ///
-    /// Not `async`: the lock can never be held across an `.await`.
     pub(super) fn join<F>(
         &self,
         key: DedupKey,
@@ -60,7 +54,6 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
             );
         }
 
-        // None, or a dead entry whose `Evict` has not run yet: start over it.
         let id = self.ids.next();
         let evict = Evict {
             inflight: self.inflight.clone(),

@@ -74,19 +74,15 @@ where
     server
 }
 
-/// Always replies with the same `result`.
 pub async fn ok(result: impl Into<Value>) -> MockServer {
     let result = result.into();
     mock_rpc(move |_| result.clone()).await
 }
 
-/// Always fails with the given HTTP status.
 pub async fn failing(status: StatusCode) -> MockServer {
     mock_rpc(move |_| status).await
 }
 
-/// Always replies HTTP 200 carrying a JSON-RPC `error` member — how providers
-/// signal a rate limit.
 pub async fn rpc_erroring(code: i64, message: &'static str) -> MockServer {
     mock_rpc(move |_| RpcReply::error(code, message)).await
 }
@@ -102,14 +98,12 @@ impl<R: Respond> Respond for Delayed<R> {
     }
 }
 
-/// Replies with `result`, but only after `delay`.
 pub async fn slow(result: impl Into<Value>, delay: std::time::Duration) -> MockServer {
     let server = MockServer::start().await;
     slow_down(&server, result, delay).await;
     server
 }
 
-/// Replaces whatever `server` replied with by `result` after `delay`.
 pub async fn slow_down(server: &MockServer, result: impl Into<Value>, delay: std::time::Duration) {
     let result = result.into();
     server.reset().await;

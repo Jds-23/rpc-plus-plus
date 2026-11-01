@@ -1,6 +1,5 @@
 // Each integration test binary compiles this module in full, so whatever a given
-// binary does not reach for reads as dead code. `healthz` needs no mock upstream;
-// only the shutdown test touches `TestApp`'s handles.
+// binary does not reach for reads as dead code.
 #![allow(dead_code)]
 
 pub mod mock_rpc_server;
@@ -78,8 +77,6 @@ fn round_robin(settings: &Settings) -> Arc<dyn Decider> {
     Arc::new(RoundRobin::new(upstreams(settings)).expect("decider build failed"))
 }
 
-/// Dropping a `JoinSet` aborts its tasks, so the refresher lives exactly as long
-/// as the caller's `tasks`.
 pub fn prefer_least_errors(
     settings: &Settings,
     observer: Arc<MetricsObserver>,
@@ -152,7 +149,6 @@ pub async fn spawn_app_with_decider(settings: Settings, decider: Arc<dyn Decider
     spawn_app_with_observer_and_decider(settings, observer, decider).await
 }
 
-/// One observer for both: a decider scoring off its own instance reads only zeros.
 pub async fn spawn_app_with_observer_and_decider(
     settings: Settings,
     observer: Arc<MetricsObserver>,
