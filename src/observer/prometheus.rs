@@ -28,10 +28,13 @@ const HEDGE_WINS_HELP: &str =
 const COALESCED_NAME: &str = "rpc_requests_coalesced_total";
 const COALESCED_HELP: &str = "Requests answered by another request's flight";
 const REQUESTS_NAME: &str = "rpc_requests_total";
-const REQUESTS_HELP: &str = "Requests that ran their own upstream chain, by outcome";
+const REQUESTS_HELP: &str = "Requests that ran their own upstream chain, by method and outcome";
 const REQUEST_ATTEMPTS_NAME: &str = "rpc_request_attempts";
 const REQUEST_ATTEMPTS_HELP: &str =
     "Upstream attempts per request, hedges included; above 1 means failover or a hedge";
+const REQUEST_DURATION_NAME: &str = "rpc_request_duration_seconds";
+const REQUEST_DURATION_HELP: &str =
+    "Time from receiving a request to its answer, failovers and hedges included, by method";
 const SUCCESS: &str = "success";
 const FAILED: &str = "failed";
 const ABANDONED: &str = "abandoned";
@@ -47,6 +50,7 @@ pub struct Collector {
     coalesced_desc: Desc,
     requests_desc: Desc,
     request_attempts_desc: Desc,
+    request_duration_desc: Desc,
 }
 
 impl Collector {
@@ -74,13 +78,19 @@ impl Collector {
         let requests_desc = Desc::new(
             REQUESTS_NAME.to_string(),
             REQUESTS_HELP.to_string(),
-            vec!["outcome".to_string()],
+            vec!["method".to_string(), "outcome".to_string()],
             HashMap::new(),
         )?;
         let request_attempts_desc = Desc::new(
             REQUEST_ATTEMPTS_NAME.to_string(),
             REQUEST_ATTEMPTS_HELP.to_string(),
-            vec![],
+            vec!["method".to_string()],
+            HashMap::new(),
+        )?;
+        let request_duration_desc = Desc::new(
+            REQUEST_DURATION_NAME.to_string(),
+            REQUEST_DURATION_HELP.to_string(),
+            vec!["method".to_string()],
             HashMap::new(),
         )?;
         Ok(Collector {
@@ -92,6 +102,7 @@ impl Collector {
             coalesced_desc,
             requests_desc,
             request_attempts_desc,
+            request_duration_desc,
         })
     }
 }
@@ -119,7 +130,12 @@ impl PrometheusCollector for Collector {
             .collect();
 
         let hedges = self.observer.hedge_snapshots();
-        let requests = self.observer.requests();
+        let requests: Vec<_> = self
+            .observer
+            .requests()
+            .into_iter()
+            .filter(|(_, request)| request.answered + request.failed > 0)
+            .collect();
         let per_pair = |count: fn(&HedgeSnapshot) -> u64| {
             hedges
                 .iter()
@@ -159,16 +175,40 @@ impl PrometheusCollector for Collector {
                 REQUESTS_NAME,
                 REQUESTS_HELP,
                 MetricType::COUNTER,
-                vec![
-                    outcome_counter_metric(SUCCESS, requests.answered),
-                    outcome_counter_metric(FAILED, requests.failed),
-                ],
+                requests
+                    .iter()
+                    .flat_map(|(method, request)| {
+                        [
+                            request_counter_metric(method, SUCCESS, request.answered),
+                            request_counter_metric(method, FAILED, request.failed),
+                        ]
+                    })
+                    .collect(),
             ),
             family(
                 REQUEST_ATTEMPTS_NAME,
                 REQUEST_ATTEMPTS_HELP,
                 MetricType::HISTOGRAM,
-                vec![attempts_histogram_metric(&requests)],
+                requests
+                    .iter()
+                    .map(|(method, request)| attempts_histogram_metric(method, request))
+                    .collect(),
+            ),
+            family(
+                REQUEST_DURATION_NAME,
+                REQUEST_DURATION_HELP,
+                MetricType::HISTOGRAM,
+                requests
+                    .iter()
+                    .map(|(method, request)| {
+                        duration_histogram_metric(
+                            label("method", method),
+                            request.duration_buckets,
+                            request.answered + request.failed,
+                            request.duration_micros_total,
+                        )
+                    })
+                    .collect(),
             ),
         ]
     }
@@ -181,6 +221,7 @@ impl PrometheusCollector for Collector {
             &self.coalesced_desc,
             &self.requests_desc,
             &self.request_attempts_desc,
+            &self.request_duration_desc,
         ]
     }
 }
@@ -224,9 +265,23 @@ fn label(name: &str, value: &str) -> LabelPair {
 }
 
 fn histogram_metric(upstream: &str, snapshot: &Snapshot) -> Metric {
+    duration_histogram_metric(
+        label("upstream", upstream),
+        snapshot.buckets,
+        attempts(snapshot),
+        snapshot.duration_micros_total,
+    )
+}
+
+fn duration_histogram_metric(
+    label: LabelPair,
+    buckets: [u64; BUCKET_BOUNDS_MICROS.len()],
+    count: u64,
+    total_micros: u64,
+) -> Metric {
     let buckets = BUCKET_BOUNDS_MICROS
         .iter()
-        .zip(cumulative(snapshot.buckets))
+        .zip(cumulative(buckets))
         .map(|(bound_micros, count)| Bucket {
             upper_bound: Some(*bound_micros as f64 / MICROS_PER_SECOND),
             cumulative_count: Some(count),
@@ -235,10 +290,10 @@ fn histogram_metric(upstream: &str, snapshot: &Snapshot) -> Metric {
         .collect();
 
     Metric {
-        label: vec![label("upstream", upstream)],
+        label: vec![label],
         histogram: Histogram {
-            sample_count: Some(attempts(snapshot)),
-            sample_sum: Some(snapshot.duration_micros_total as f64 / MICROS_PER_SECOND),
+            sample_count: Some(count),
+            sample_sum: Some(total_micros as f64 / MICROS_PER_SECOND),
             bucket: buckets,
             ..Default::default()
         }
@@ -247,7 +302,7 @@ fn histogram_metric(upstream: &str, snapshot: &Snapshot) -> Metric {
     }
 }
 
-fn attempts_histogram_metric(requests: &RequestSnapshot) -> Metric {
+fn attempts_histogram_metric(method: &str, requests: &RequestSnapshot) -> Metric {
     let buckets = ATTEMPT_BOUNDS
         .iter()
         .zip(cumulative(requests.attempt_buckets))
@@ -259,6 +314,7 @@ fn attempts_histogram_metric(requests: &RequestSnapshot) -> Metric {
         .collect();
 
     Metric {
+        label: vec![label("method", method)],
         histogram: Histogram {
             sample_count: Some(requests.answered + requests.failed),
             sample_sum: Some(requests.attempts_total as f64),
@@ -294,9 +350,9 @@ fn pair_counter_metric(upstream: &str, to: &str, value: u64) -> Metric {
     }
 }
 
-fn outcome_counter_metric(outcome: &str, value: u64) -> Metric {
+fn request_counter_metric(method: &str, outcome: &str, value: u64) -> Metric {
     Metric {
-        label: vec![label("outcome", outcome)],
+        label: vec![label("method", method), label("outcome", outcome)],
         counter: Counter {
             value: Some(value as f64),
             ..Default::default()
@@ -346,7 +402,8 @@ mod tests {
             MetricsObserver, Observer,
             prometheus::{
                 ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, COALESCED_NAME, Collector, HEDGE_WINS_NAME,
-                HEDGES_NAME, REQUEST_ATTEMPTS_NAME, REQUESTS_NAME, cumulative,
+                HEDGES_NAME, REQUEST_ATTEMPTS_NAME, REQUEST_DURATION_NAME, REQUESTS_NAME,
+                cumulative,
             },
         },
         upstream::{
@@ -552,27 +609,68 @@ rpc_requests_coalesced_total 2
                 COALESCED_NAME,
                 REQUESTS_NAME,
                 REQUEST_ATTEMPTS_NAME,
+                REQUEST_DURATION_NAME,
             ]
         );
     }
 
-    const EXPECTED_REQUESTS: &str = r#"# HELP rpc_requests_total Requests that ran their own upstream chain, by outcome
+    const EXPECTED_REQUESTS: &str = r#"# HELP rpc_requests_total Requests that ran their own upstream chain, by method and outcome
 # TYPE rpc_requests_total counter
-rpc_requests_total{outcome="success"} 2
-rpc_requests_total{outcome="failed"} 1
+rpc_requests_total{method="eth_call",outcome="success"} 2
+rpc_requests_total{method="eth_call",outcome="failed"} 1
+rpc_requests_total{method="other",outcome="success"} 0
+rpc_requests_total{method="other",outcome="failed"} 1
 "#;
 
     /// One request per path: answered first try, failed over once, exhausted 3.
     const EXPECTED_REQUEST_ATTEMPTS: &str = r#"# HELP rpc_request_attempts Upstream attempts per request, hedges included; above 1 means failover or a hedge
 # TYPE rpc_request_attempts histogram
-rpc_request_attempts_bucket{le="1"} 1
-rpc_request_attempts_bucket{le="2"} 2
-rpc_request_attempts_bucket{le="3"} 3
-rpc_request_attempts_bucket{le="5"} 3
-rpc_request_attempts_bucket{le="10"} 3
-rpc_request_attempts_bucket{le="+Inf"} 3
-rpc_request_attempts_sum 6
-rpc_request_attempts_count 3
+rpc_request_attempts_bucket{method="eth_call",le="1"} 1
+rpc_request_attempts_bucket{method="eth_call",le="2"} 2
+rpc_request_attempts_bucket{method="eth_call",le="3"} 3
+rpc_request_attempts_bucket{method="eth_call",le="5"} 3
+rpc_request_attempts_bucket{method="eth_call",le="10"} 3
+rpc_request_attempts_bucket{method="eth_call",le="+Inf"} 3
+rpc_request_attempts_sum{method="eth_call"} 6
+rpc_request_attempts_count{method="eth_call"} 3
+rpc_request_attempts_bucket{method="other",le="1"} 1
+rpc_request_attempts_bucket{method="other",le="2"} 1
+rpc_request_attempts_bucket{method="other",le="3"} 1
+rpc_request_attempts_bucket{method="other",le="5"} 1
+rpc_request_attempts_bucket{method="other",le="10"} 1
+rpc_request_attempts_bucket{method="other",le="+Inf"} 1
+rpc_request_attempts_sum{method="other"} 1
+rpc_request_attempts_count{method="other"} 1
+"#;
+
+    const EXPECTED_REQUEST_DURATION: &str = r#"# HELP rpc_request_duration_seconds Time from receiving a request to its answer, failovers and hedges included, by method
+# TYPE rpc_request_duration_seconds histogram
+rpc_request_duration_seconds_bucket{method="eth_call",le="0.005"} 0
+rpc_request_duration_seconds_bucket{method="eth_call",le="0.01"} 0
+rpc_request_duration_seconds_bucket{method="eth_call",le="0.025"} 0
+rpc_request_duration_seconds_bucket{method="eth_call",le="0.05"} 1
+rpc_request_duration_seconds_bucket{method="eth_call",le="0.1"} 2
+rpc_request_duration_seconds_bucket{method="eth_call",le="0.25"} 2
+rpc_request_duration_seconds_bucket{method="eth_call",le="0.5"} 2
+rpc_request_duration_seconds_bucket{method="eth_call",le="1"} 2
+rpc_request_duration_seconds_bucket{method="eth_call",le="3"} 2
+rpc_request_duration_seconds_bucket{method="eth_call",le="5"} 3
+rpc_request_duration_seconds_bucket{method="eth_call",le="+Inf"} 3
+rpc_request_duration_seconds_sum{method="eth_call"} 3.32
+rpc_request_duration_seconds_count{method="eth_call"} 3
+rpc_request_duration_seconds_bucket{method="other",le="0.005"} 1
+rpc_request_duration_seconds_bucket{method="other",le="0.01"} 1
+rpc_request_duration_seconds_bucket{method="other",le="0.025"} 1
+rpc_request_duration_seconds_bucket{method="other",le="0.05"} 1
+rpc_request_duration_seconds_bucket{method="other",le="0.1"} 1
+rpc_request_duration_seconds_bucket{method="other",le="0.25"} 1
+rpc_request_duration_seconds_bucket{method="other",le="0.5"} 1
+rpc_request_duration_seconds_bucket{method="other",le="1"} 1
+rpc_request_duration_seconds_bucket{method="other",le="3"} 1
+rpc_request_duration_seconds_bucket{method="other",le="5"} 1
+rpc_request_duration_seconds_bucket{method="other",le="+Inf"} 1
+rpc_request_duration_seconds_sum{method="other"} 0.002
+rpc_request_duration_seconds_count{method="other"} 1
 "#;
 
     #[test]
@@ -581,9 +679,10 @@ rpc_request_attempts_count 3
         let observer = Arc::new(MetricsObserver::new(vec![alpha]));
         let collector = Collector::new(observer.clone()).unwrap();
 
-        observer.record_request(true, 1);
-        observer.record_request(true, 2);
-        observer.record_request(false, 3);
+        observer.record_request("eth_call", true, 1, Duration::from_millis(40));
+        observer.record_request("eth_call", true, 2, Duration::from_millis(80));
+        observer.record_request("eth_call", false, 3, Duration::from_millis(3200));
+        observer.record_request("other", false, 1, Duration::from_millis(2));
 
         let families = collector.collect();
 
@@ -591,6 +690,10 @@ rpc_request_attempts_count 3
         assert_eq!(
             encode(&families, REQUEST_ATTEMPTS_NAME),
             EXPECTED_REQUEST_ATTEMPTS
+        );
+        assert_eq!(
+            encode(&families, REQUEST_DURATION_NAME),
+            EXPECTED_REQUEST_DURATION
         );
     }
 

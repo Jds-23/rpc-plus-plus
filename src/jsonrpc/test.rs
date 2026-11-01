@@ -52,6 +52,10 @@ fn clean_result_never_reaches_the_parser() {
     assert_eq!(rpc_fault_in(&body), None);
 }
 
+fn is_write(body: &Bytes) -> bool {
+    is_write_method(method_label(body))
+}
+
 fn request(method: &str) -> Bytes {
     Bytes::from(format!(
         r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":[]}}"#

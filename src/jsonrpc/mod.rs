@@ -81,13 +81,11 @@ struct MethodEnvelope<'a> {
     method: Cow<'a, str>,
 }
 
-// No byte prefilter: a skip can't prove `method` exists, and misses `\u` escapes.
-pub(crate) fn is_write(body: &Bytes) -> bool {
-    !is_idempotent_read(method_label(body))
+pub(crate) fn is_write_method(method: &str) -> bool {
+    !is_idempotent_read(method)
 }
 
-/// One of `method_labels()`, so a metric label can't grow with whatever callers send.
-/// Batches, missing or non-string methods and unknown methods are all `OTHER_METHOD`.
+// No byte prefilter: a skip can't prove `method` exists, and misses `\u` escapes.
 pub(crate) fn method_label(body: &Bytes) -> &'static str {
     let Ok(envelope) = serde_json::from_slice::<MethodEnvelope>(body) else {
         return OTHER_METHOD;
