@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -8,17 +8,16 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    decider::{Ranking, least_latency::LeastLatency},
+    decider::{Ranking, least_latency::LeastLatency, window::Window},
     observer::{MetricsObserver, snapshot::Snapshot},
     upstream::{Upstream, UpstreamId},
 };
 
 pub struct LatencyRefresher {
     pub metrics_observer: Arc<MetricsObserver>,
-    pub baseline: VecDeque<HashMap<UpstreamId, Snapshot>>,
+    pub window: Window,
     pub decider: Arc<LeastLatency>,
     pub interval: Duration,
-    pub window_ticks: usize,
     pub min_samples: u64,
     pub margin: f64,
     pub penalty: Duration,
@@ -40,15 +39,12 @@ impl LatencyRefresher {
     pub fn refresh(&mut self) {
         let started = Instant::now();
         let current: HashMap<UpstreamId, Snapshot> = self.metrics_observer.snapshot_map();
-        let baseline = self
-            .baseline
-            .front()
-            .expect("seeded at construction and trimmed only after a push");
+        let baseline = self.window.oldest();
         let current_ranking = self.decider.ranking.load_full();
 
-        let window_secs = self.baseline.len() as u64 * self.interval.as_secs();
-        let want_secs = self.window_ticks as u64 * self.interval.as_secs();
-        if self.baseline.len() < self.window_ticks {
+        let window_secs = self.window.span().as_secs();
+        let want_secs = self.window.wanted_span().as_secs();
+        if !self.window.is_full() {
             tracing::warn!(
                 event = "ranking_window_incomplete",
                 have_secs = window_secs,
@@ -83,7 +79,7 @@ impl LatencyRefresher {
                 let key = match score {
                     None => SortKey::unscored(),
                     Some(score) if incumbent == Some(id) => {
-                        SortKey::scored(score.mul_f64(self.margin))
+                        SortKey::scored(score.mul_f64(1.0 - self.margin))
                     }
                     Some(score) => SortKey::scored(score),
                 };
@@ -111,10 +107,7 @@ impl LatencyRefresher {
         self.decider.ranking.store(Arc::new(Ranking {
             upstreams: scored.into_iter().map(|(upstream, _)| upstream).collect(),
         }));
-        self.baseline.push_back(current);
-        if self.baseline.len() > self.window_ticks {
-            self.baseline.pop_front();
-        }
+        self.window.advance(current);
     }
 }
 
@@ -202,10 +195,9 @@ mod tests {
         });
         let refresher = LatencyRefresher {
             metrics_observer: observer.clone(),
-            baseline: VecDeque::from([observer.snapshot_map()]),
+            window: Window::new(observer.snapshot_map(), window_ticks, REFRESH_DEFAULT),
             decider: decider.clone(),
             interval: REFRESH_DEFAULT,
-            window_ticks,
             min_samples: MIN_WINDOW_SAMPLES,
             margin: PROMOTION_MARGIN,
             penalty: PENALTY,
@@ -415,7 +407,11 @@ mod tests {
         for _ in 0..5 {
             record_ok(&observer, "a", 40, ms(10));
             refresher.refresh();
-            assert_eq!(refresher.baseline.len(), 1, "the baseline should not grow");
+            assert_eq!(
+                refresher.window.ticks_held(),
+                1,
+                "the baseline should not grow"
+            );
         }
     }
 
@@ -433,7 +429,7 @@ mod tests {
             refresher.refresh();
         }
 
-        assert_eq!(refresher.baseline.len(), 3);
+        assert_eq!(refresher.window.ticks_held(), 3);
         assert_eq!(order(&decider), ["b", "a"], "the window forgot too early");
     }
 }

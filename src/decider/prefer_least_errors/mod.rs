@@ -1,13 +1,16 @@
 pub mod refresher;
 
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    decider::{BuildError, Decider, Ranking, prefer_least_errors::refresher::RankingRefresher},
+    decider::{
+        BuildError, Decider, Ranking, prefer_least_errors::refresher::RankingRefresher,
+        window::Window,
+    },
     observer::MetricsObserver,
     upstream::Upstream,
 };
@@ -18,7 +21,7 @@ pub const WINDOW_DEFAULT: usize = 4;
 
 const MIN_WINDOW_SAMPLES: u64 = 20;
 
-const PROMOTION_MARGIN: f64 = 0.8;
+const PROMOTION_MARGIN: f64 = 0.20;
 
 pub struct PreferLeastErrors {
     ranking: ArcSwap<Ranking>,
@@ -51,11 +54,10 @@ impl PreferLeastErrors {
             ranking: ArcSwap::from_pointee(Ranking { upstreams }),
         });
         let ranking_refresher = RankingRefresher {
-            baseline: VecDeque::from([observer.snapshot_map()]),
+            window: Window::new(observer.snapshot_map(), window, refresh),
             metrics_observer: observer,
             decider: decider.clone(),
             interval: refresh,
-            window_ticks: window,
             min_samples: MIN_WINDOW_SAMPLES,
             margin: PROMOTION_MARGIN,
         };
