@@ -18,5 +18,5 @@ async fn healthz_returns_ok() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::OK);
-    assert!(!res.bytes().await.unwrap().is_empty());
+    assert_eq!(res.text().await.unwrap(), "OK");
 }

@@ -30,7 +30,7 @@ mod tests {
     use std::sync::Arc;
 
     use axum::extract::State;
-    use prometheus::{Encoder, Registry, TextEncoder};
+    use prometheus::Registry;
 
     use crate::http::metrics::get_metrics;
 
@@ -46,7 +46,7 @@ mod tests {
                 .headers()
                 .get(axum::http::header::CONTENT_TYPE)
                 .unwrap(),
-            TextEncoder::new().format_type()
+            "text/plain; version=0.0.4"
         );
     }
 }

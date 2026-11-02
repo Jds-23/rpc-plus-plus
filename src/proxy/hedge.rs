@@ -326,9 +326,11 @@ mod tests {
 
         let out = run(&chain, &fakes, 3).await;
 
-        assert_eq!(
-            answer(&out),
-            Err("upstream returned rpc error code 3".to_string()),
+        assert!(
+            matches!(
+                out.result,
+                Err(Failure::Call(CallError::RpcError { code: 3, .. }))
+            ),
             "a revert is the answer every upstream would give"
         );
         assert_eq!(started.elapsed(), Duration::from_millis(5));
