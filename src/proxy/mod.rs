@@ -316,13 +316,18 @@ impl Core {
             )
         })
         .await;
-        if let (1, Ok(Won { index, .. })) = (raced.hedge.won, &raced.result) {
+        if let Ok(Won {
+            index,
+            cause: Cause::Hedge { overtaken },
+            ..
+        }) = &raced.result
+        {
             self.observer
-                .record_hedge_win(chain[*index - 1].id(), chain[*index].id());
+                .record_hedge_win(overtaken.id(), chain[*index].id());
         }
 
         Finished {
-            result: raced.result.map(|Won { index, answer }| Answered {
+            result: raced.result.map(|Won { index, answer, .. }| Answered {
                 reply: answer,
                 upstream: chain[index].id(),
             }),

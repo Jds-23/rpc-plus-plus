@@ -14,19 +14,21 @@ pub(super) struct Start<'a> {
     pub cause: Cause<'a>,
 }
 
+#[derive(Clone, Copy)]
 pub(super) enum Cause<'a> {
     First,
     Hedge { overtaken: &'a Upstream },
     Failover { from: &'a Upstream },
 }
 
-pub(super) struct Won<T> {
+pub(super) struct Won<'a, T> {
     pub index: usize,
+    pub cause: Cause<'a>,
     pub answer: T,
 }
 
-pub(super) struct Raced<T> {
-    pub result: Result<Won<T>, Failure>,
+pub(super) struct Raced<'a, T> {
+    pub result: Result<Won<'a, T>, Failure>,
     pub started: usize,
     pub hedge: HedgeSnapshot,
 }
@@ -35,16 +37,15 @@ pub(super) async fn race<'a, T, F, Fut>(
     chain: &'a [Arc<Upstream>],
     max_attempt: usize,
     mut call: F,
-) -> Raced<T>
+) -> Raced<'a, T>
 where
     F: FnMut(&'a Upstream, Start<'a>) -> Fut,
     Fut: Future<Output = Result<T, CallError>>,
 {
     let limit = chain.len().min(max_attempt);
     let launch = |call: &mut F, index: usize, cause: Cause<'a>| {
-        let hedge = matches!(cause, Cause::Hedge { .. });
         let pending = call(&chain[index], Start { index, cause });
-        async move { (index, hedge, pending.await) }
+        async move { (index, cause, pending.await) }
     };
 
     let mut inflight = FuturesUnordered::new();
@@ -70,11 +71,15 @@ where
 
         tokio::select! {
             biased;
-            Some((index, hedged, result)) = inflight.next() => match result {
+            Some((index, cause, result)) = inflight.next() => match result {
                 Ok(answer) => {
-                    hedge.won = u64::from(hedged);
+                    hedge.won = u64::from(matches!(cause, Cause::Hedge { .. }));
                     return Raced {
-                        result: Ok(Won { index, answer }),
+                        result: Ok(Won {
+                            index,
+                            cause,
+                            answer,
+                        }),
                         started: next,
                         hedge,
                     };
@@ -183,11 +188,11 @@ mod tests {
             .unzip()
     }
 
-    async fn run(
-        chain: &[Arc<Upstream>],
+    async fn run<'a>(
+        chain: &'a [Arc<Upstream>],
         fakes: &[Fake],
         max_attempt: usize,
-    ) -> Raced<&'static str> {
+    ) -> Raced<'a, &'static str> {
         race(chain, max_attempt, |upstream, _| {
             let fake = fakes
                 .iter()
@@ -197,7 +202,7 @@ mod tests {
         .await
     }
 
-    fn answer(raced: &Raced<&'static str>) -> Result<&'static str, String> {
+    fn answer(raced: &Raced<'_, &'static str>) -> Result<&'static str, String> {
         raced
             .result
             .as_ref()
