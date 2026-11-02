@@ -15,7 +15,7 @@ use crate::{
     upstream::call::{CallError, CallOutcome, CallResult, error_chain},
 };
 
-const DEFAULT_RPC_TIMEOUT_IN_SECS: u64 = 3;
+pub(crate) const DEFAULT_RPC_TIMEOUT_IN_SECS: u64 = 3;
 const DEFAULT_HEDGE_AFTER_IN_MILLIS: u64 = 250;
 
 const POOL_MAX_IDLE_PER_HOST: usize = 32;
