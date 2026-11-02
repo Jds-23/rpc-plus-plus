@@ -144,7 +144,8 @@ pub async fn build(settings: Settings, shutdown: &CancellationToken) -> Result<A
 
     let http = build_http_client(&settings.application.proxy)
         .context("failed to build the HTTP client")?;
-    let upstreams = build_all(settings.upstreams, http, &settings.application.proxy);
+    let upstreams = build_all(settings.upstreams, http, &settings.application.proxy)
+        .context("failed to build the upstreams")?;
     let observer = Arc::new(MetricsObserver::new(
         upstreams.iter().map(|upstream| upstream.id().clone()),
     ));

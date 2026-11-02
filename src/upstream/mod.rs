@@ -74,6 +74,14 @@ pub enum BuildError {
     HttpClient(#[from] reqwest::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("upstream {label}: {source}")]
+pub struct BuildAllError {
+    pub label: String,
+    #[source]
+    pub source: BuildError,
+}
+
 #[bon::bon]
 impl Upstream {
     #[builder]
@@ -169,13 +177,17 @@ impl Upstream {
     }
 }
 
-pub fn build_all<I>(upstreams: I, http: reqwest::Client, proxy: &ProxySettings) -> Vec<Upstream>
+pub fn build_all<I>(
+    upstreams: I,
+    http: reqwest::Client,
+    proxy: &ProxySettings,
+) -> Result<Vec<Upstream>, BuildAllError>
 where
     I: IntoIterator<Item = UpstreamSettings>,
 {
     upstreams
         .into_iter()
-        .filter_map(|item| {
+        .map(|item| {
             Upstream::builder()
                 .http(http.clone())
                 .label(item.label.clone())
@@ -186,14 +198,10 @@ where
                         .unwrap_or(proxy.hedge.after_in_millis),
                 )
                 .build()
-                .map_err(|err| {
-                    tracing::warn!(
-                        event = "upstream_skipped",
-                        upstream = %item.label,
-                        error = %err,
-                    );
+                .map_err(|source| BuildAllError {
+                    label: item.label,
+                    source,
                 })
-                .ok()
         })
         .collect()
 }
@@ -264,7 +272,8 @@ mod tests {
 
     #[test]
     fn an_upstream_override_wins_over_the_global_threshold() {
-        let upstreams = build_all([settings("one", Some(400))], Client::new(), &proxy(100));
+        let upstreams =
+            build_all([settings("one", Some(400))], Client::new(), &proxy(100)).unwrap();
 
         assert_eq!(upstreams[0].hedge_after(), Duration::from_millis(400));
     }
@@ -275,9 +284,26 @@ mod tests {
             [settings("one", Some(400)), settings("two", None)],
             Client::new(),
             &proxy(100),
-        );
+        )
+        .unwrap();
 
         assert_eq!(upstreams[1].id().as_str(), "two");
         assert_eq!(upstreams[1].hedge_after(), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_bad_upstream_fails_the_build_by_label() {
+        let error = build_all(
+            [settings("one", None), settings("two", Some(0))],
+            Client::new(),
+            &proxy(100),
+        )
+        .expect_err("a zero threshold should fail the build");
+
+        assert_eq!(error.label, "two");
+        assert!(
+            matches!(error.source, BuildError::ZeroHedgeAfter),
+            "{error}"
+        );
     }
 }
