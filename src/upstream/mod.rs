@@ -139,14 +139,14 @@ impl Upstream {
 
     async fn call_inner(&self, body: &Bytes) -> Result<CallOutcome, CallError> {
         let res = self.send(body).await.map_err(|err| {
-            let error = error_chain(&err.without_url());
+            let error = error_chain(err);
             CallError::Unreachable { error }
         })?;
 
         let http_status = res.status();
 
         let body = res.bytes().await.map_err(|err| {
-            let error = error_chain(&err.without_url());
+            let error = error_chain(err);
             CallError::ReadFailed { http_status, error }
         })?;
 
