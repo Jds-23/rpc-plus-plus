@@ -1,5 +1,9 @@
 # rpc-plus-plus
 
+## Checks
+
+Run checks through `just` (same recipes CI uses): `just ci` before handing work back, `just test <filter>` or `just test-file <name>` for targeted runs. `just` lists all recipes.
+
 ## Commits
 
 One line, emoji first, Conventional Commits underneath:
