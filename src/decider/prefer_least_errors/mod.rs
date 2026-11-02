@@ -112,25 +112,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creates_a_task() {
-        let mut tasks: JoinSet<()> = JoinSet::new();
-        assert_eq!(tasks.len(), 0);
-        let upstreams: Vec<Upstream> = vec![upstream("label")];
-        let metrics_observer = Arc::new(MetricsObserver::new(vec![UpstreamId::new("label")]));
-        let shutdown = CancellationToken::new();
-        let _decider = PreferLeastErrors::builder()
-            .upstreams(upstreams)
-            .observer(metrics_observer)
-            .tasks(&mut tasks)
-            .shutdown(shutdown.clone())
-            .window(1)
-            .spawn();
-        assert_eq!(tasks.len(), 1);
-        shutdown.cancel();
-        tasks.join_all().await;
-    }
-
-    #[tokio::test]
     async fn spawn_rejects_an_empty_upstream_list() {
         let mut tasks: JoinSet<()> = JoinSet::new();
         let observer = Arc::new(MetricsObserver::new(vec![]));

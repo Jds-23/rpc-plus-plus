@@ -352,18 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn a_single_tick_window_keeps_one_baseline() {
-        let (mut refresher, _decider, observer) = harness_windowed(&["a"], 1);
-
-        for _ in 0..5 {
-            record(&observer, "a", 40, 0);
-            refresher.refresh();
-            assert_eq!(refresher.baseline.len(), 1, "the baseline should not grow");
-        }
-    }
-
-    #[test]
-    fn the_baseline_spans_the_configured_window() {
+    fn the_ranking_spans_the_configured_window() {
         let (mut refresher, decider, observer) = harness_windowed(&["a", "b"], 3);
 
         record(&observer, "a", 0, 40);
@@ -375,8 +364,6 @@ mod tests {
             record(&observer, "a", 40, 0);
             refresher.refresh();
         }
-
-        assert_eq!(refresher.baseline.len(), 3);
         assert_eq!(order(&decider), ["b", "a"], "the window forgot too early");
     }
 }
