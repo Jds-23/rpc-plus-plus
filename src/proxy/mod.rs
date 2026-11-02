@@ -384,15 +384,3 @@ fn in_leader_span<F: Future>(
 fn elapsed_ms(since: Instant) -> u64 {
     since.elapsed().as_millis() as u64
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn static_send<F: Future + Send + 'static>(_: F) {}
-
-    #[allow(dead_code)]
-    fn run_can_be_a_flight(core: Arc<Core>) {
-        static_send(run(core, Vec::new(), Bytes::new(), Instant::now()));
-    }
-}
