@@ -25,7 +25,7 @@ use crate::{
     observer::{Observer, snapshot::HedgeSnapshot},
     proxy::{
         attempt::try_once,
-        hedge::{Won, race},
+        hedge::{Cause, Won, race},
         reply::Reply,
         singleflight::{Role, SingleFlight},
     },
@@ -229,7 +229,8 @@ impl Core {
             if tried.len() >= self.max_attempt {
                 break;
             }
-            if !tried.is_empty() {
+            if let Some(from) = tried.last() {
+                self.observer.record_failover(from);
                 tokio::time::sleep(self.retry_after).await;
             }
             tried.push(upstream.id());
@@ -295,15 +296,23 @@ impl Core {
 
     async fn race<'c>(&self, chain: &'c [Arc<Upstream>], body: &Bytes) -> Finished<'c> {
         let raced = race(chain, self.max_attempt, |upstream, start| {
-            if let Some(overtaken) = start.overtaken {
-                self.observer.record_hedge(overtaken.id(), upstream.id());
-            }
+            let hedge = match start.cause {
+                Cause::First => false,
+                Cause::Hedge { overtaken } => {
+                    self.observer.record_hedge(overtaken.id(), upstream.id());
+                    true
+                }
+                Cause::Failover { from } => {
+                    self.observer.record_failover(from.id());
+                    false
+                }
+            };
             try_once(
                 self.observer.as_ref(),
                 upstream,
                 body,
                 start.index as u64 + 1,
-                start.overtaken.is_some(),
+                hedge,
             )
         })
         .await;
