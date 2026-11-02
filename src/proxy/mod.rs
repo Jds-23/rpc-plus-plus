@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::{Instrument, Span, error, info, info_span, warn};
+use tracing::{Instrument, Span, error, info, info_span, instrument::Instrumented, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -164,10 +164,11 @@ impl Pipeline {
 
         let core = self.core.clone();
         let leader_body = body.clone();
-        let span = Span::current();
-        let (flight, role) = flights.join(key, me, move || {
-            core.start(leader_body, received_at).instrument(span)
-        });
+        let (flight, role) = flights.join(
+            key,
+            me,
+            in_leader_span(move || core.start(leader_body, received_at)),
+        );
 
         match role {
             Role::Leader => flight.await,
@@ -371,6 +372,13 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Reply {
             Reply::rpc_error(JSONRPC_INTERNAL_ERROR, &error)
         }
     }
+}
+
+fn in_leader_span<F: Future>(
+    make: impl FnOnce() -> F + Send + 'static,
+) -> impl FnOnce() -> Instrumented<F> + Send + 'static {
+    let span = Span::current();
+    move || make().instrument(span)
 }
 
 fn elapsed_ms(since: Instant) -> u64 {
