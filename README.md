@@ -77,6 +77,17 @@ Set `RPC_CONFIG_PATH` to read the config from somewhere other than `./settings.y
 
 `application.host` stays on loopback unless you widen it deliberately — inside a container it has to be `0.0.0.0`. There is no auth yet, so a reachable proxy is an open relay spending your upstream API keys.
 
+## Develop
+
+Checks run through [`just`](https://github.com/casey/just) and [`cargo-nextest`](https://nexte.st), the same recipes CI uses:
+
+```sh
+just ci                  # fmt-check, clippy, tests, doctests
+just test observer       # tests matching a filter
+just test-file cors      # one tests/<name>.rs file
+just fix                 # cargo fmt + clippy --fix
+```
+
 ## Dashboard
 
 ```sh
