@@ -1,7 +1,6 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::StatusCode;
-use rpc_plus_plus::upstream::UpstreamId;
 use serde_json::json;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -31,26 +30,44 @@ async fn the_decider_scores_from_the_observer_the_proxy_writes_to() {
         &mut tasks,
         shutdown.clone(),
         Duration::from_millis(50),
-        1,
+        100,
     );
-    assert_eq!(tasks.len(), 1, "the refresher should be parked in `tasks`");
 
-    let addr = spawn_app_with_observer_and_decider(settings, observer.clone(), decider).await;
+    let addr = spawn_app_with_observer_and_decider(settings, observer, decider).await;
 
     let client = reqwest::Client::new();
-    for _ in 0..10 {
-        client
+    let send = || async {
+        let res = client
             .post(format!("{addr}/rpc"))
             .json(&json!({"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}))
             .send()
             .await
             .unwrap();
-    }
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["result"], "0xa");
+    };
 
-    let sick_stats = observer.snapshot(&UpstreamId::new("sick")).unwrap();
-    let healthy_stats = observer.snapshot(&UpstreamId::new("healthy")).unwrap();
-    assert!(sick_stats.error_status > 0, "proxy recorded no failures");
-    assert!(healthy_stats.success > 0, "proxy recorded no successes");
+    for _ in 0..20 {
+        send().await;
+    }
+    assert_eq!(
+        sick.received_requests().await.unwrap().len(),
+        20,
+        "`sick` leads until the ranking has seen enough calls"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let before = sick.received_requests().await.unwrap().len();
+        send().await;
+        if sick.received_requests().await.unwrap().len() == before {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the proxy kept leading with `sick` after recording its failures"
+        );
+    }
 
     shutdown.cancel();
     tasks.join_all().await;
