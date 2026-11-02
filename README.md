@@ -97,10 +97,10 @@ Grafana opens on the provisioned **rpc-plus-plus** dashboard without a login (an
 | p50 / p95 / p99 per upstream | `rpc_attempt_duration_seconds` |
 | Error rate by upstream | failed answers over all answers in `rpc_attempts_total`; abandoned calls left out |
 | Attempt errors by kind | `rpc_attempts_total` by `upstream` and failed `outcome` |
-| Failover | `rpc_request_attempts`: requests that took more than one attempt |
+| Failover ratio, Failover | `rpc_failovers_total{upstream}`: the chain moved past that upstream after a retryable failure; hedges not counted |
 | Hedges, hedge win rate | `rpc_hedges_total`, `rpc_hedge_wins_total` by overtaken `upstream` |
 
-`rpc_requests_total` counts each request that ran its own upstream chain, once, however it ended; a coalesced follower shows up in `rpc_requests_coalesced_total` instead, and a rejected batch in neither. `rpc_request_attempts` is how many upstream calls that chain made. With hedging on, a hedge is an attempt too, so "more than one attempt" means failover *or* a hedge. `rpc_request_duration_seconds` times that same chain end to end, from receiving the request to its answer, failovers and hedges included.
+`rpc_requests_total` counts each request that ran its own upstream chain, once, however it ended; a coalesced follower shows up in `rpc_requests_coalesced_total` instead, and a rejected batch in neither. `rpc_request_attempts` is how many upstream calls that chain made. With hedging on, a hedge is an attempt too, so "more than one attempt" means failover *or* a hedge; `rpc_failovers_total` counts failovers alone. `rpc_request_duration_seconds` times that same chain end to end, from receiving the request to its answer, failovers and hedges included.
 
 All three carry `method`: one of the known read and send methods, or `other` for anything else, so the label can't grow with what callers send. A method only appears on `/metrics` once a request for it has run.
 

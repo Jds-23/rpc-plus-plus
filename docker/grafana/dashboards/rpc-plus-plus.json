@@ -199,7 +199,7 @@
       "id": 3,
       "type": "stat",
       "title": "Failover ratio",
-      "description": "Share of requests that needed more than one upstream attempt (failover, or a hedge when hedging is on).",
+      "description": "Failovers per request that ran its own upstream chain, all methods. Hedges are not failovers. Can pass 100% when requests fail over more than once.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -256,7 +256,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(increase(rpc_request_attempts_count{method=~\"$method\"}[$__range])) - sum(increase(rpc_request_attempts_bucket{method=~\"$method\",le=~\"1|1.0\"}[$__range]))) / sum(increase(rpc_request_attempts_count{method=~\"$method\"}[$__range]))",
+          "expr": "sum(increase(rpc_failovers_total[$__range])) / sum(increase(rpc_requests_total[$__range]))",
           "refId": "A",
           "instant": true
         }
@@ -1217,7 +1217,7 @@
       "id": 14,
       "type": "timeseries",
       "title": "Failover",
-      "description": "Requests per second by how many upstream attempts they took. Anything past 1 failed over (or hedged).",
+      "description": "Failovers per second, by the upstream left behind after a retryable failure. Hedges are not counted.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1230,7 +1230,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
+          "unit": "ops",
           "color": {
             "mode": "palette-classic"
           },
@@ -1246,38 +1246,7 @@
             }
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "1 attempt"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "green"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "> 1 attempt"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "orange"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
         "legend": {
@@ -1296,19 +1265,9 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(rpc_request_attempts_bucket{method=~\"$method\",le=~\"1|1.0\"}[$__rate_interval]))",
-          "legendFormat": "1 attempt",
+          "expr": "sum by (upstream) (rate(rpc_failovers_total{upstream=~\"$upstream\"}[$__rate_interval]))",
+          "legendFormat": "{{upstream}}",
           "refId": "A",
-          "range": true
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum(rate(rpc_request_attempts_count{method=~\"$method\"}[$__rate_interval])) - sum(rate(rpc_request_attempts_bucket{method=~\"$method\",le=~\"1|1.0\"}[$__rate_interval]))",
-          "legendFormat": "> 1 attempt",
-          "refId": "B",
           "range": true
         }
       ]

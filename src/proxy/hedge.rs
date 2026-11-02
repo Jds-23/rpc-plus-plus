@@ -11,7 +11,13 @@ use crate::{
 
 pub(super) struct Start<'a> {
     pub index: usize,
-    pub overtaken: Option<&'a Upstream>,
+    pub cause: Cause<'a>,
+}
+
+pub(super) enum Cause<'a> {
+    First,
+    Hedge { overtaken: &'a Upstream },
+    Failover { from: &'a Upstream },
 }
 
 pub(super) struct Won<T> {
@@ -35,12 +41,9 @@ where
     Fut: Future<Output = Result<T, CallError>>,
 {
     let limit = chain.len().min(max_attempt);
-    let launch = |call: &mut F, index: usize, hedge: bool| {
-        let start = Start {
-            index,
-            overtaken: hedge.then(|| chain[index - 1].as_ref()),
-        };
-        let pending = call(&chain[index], start);
+    let launch = |call: &mut F, index: usize, cause: Cause<'a>| {
+        let hedge = matches!(cause, Cause::Hedge { .. });
+        let pending = call(&chain[index], Start { index, cause });
         async move { (index, hedge, pending.await) }
     };
 
@@ -50,7 +53,7 @@ where
     let mut last_failure = None;
 
     if limit > 0 {
-        inflight.push(launch(&mut call, 0, false));
+        inflight.push(launch(&mut call, 0, Cause::First));
         next = 1;
     }
 
@@ -86,7 +89,8 @@ where
                 Err(failure) => {
                     last_failure = Some(failure);
                     if more {
-                        inflight.push(launch(&mut call, next, false));
+                        let from = chain[index].as_ref();
+                        inflight.push(launch(&mut call, next, Cause::Failover { from }));
                         next += 1;
                     }
                 }
@@ -98,7 +102,8 @@ where
                     upstream = %chain[next].id(),
                     after_ms = hedge_after.as_millis() as u64,
                 );
-                inflight.push(launch(&mut call, next, true));
+                let overtaken = chain[next - 1].as_ref();
+                inflight.push(launch(&mut call, next, Cause::Hedge { overtaken }));
                 next += 1;
                 hedge.started += 1;
             }
@@ -108,7 +113,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, time::Duration};
+    use std::{
+        cell::{Cell, RefCell},
+        time::Duration,
+    };
 
     use reqwest::{Client, StatusCode};
     use tokio::time::Instant;
@@ -240,9 +248,23 @@ mod tests {
         let (chain, fakes) = chain(&[(5, Verdict::Fails), (10, Verdict::Succeeds)], 50);
         let started = Instant::now();
 
-        let out = run(&chain, &fakes, 3).await;
+        let causes = RefCell::new(Vec::new());
+
+        let out = race(&chain, 3, |upstream, start| {
+            causes.borrow_mut().push(match start.cause {
+                Cause::First => "first".to_string(),
+                Cause::Hedge { overtaken } => format!("hedge from {}", overtaken.id()),
+                Cause::Failover { from } => format!("failover from {}", from.id()),
+            });
+            let fake = fakes
+                .iter()
+                .find(|fake| fake.name == upstream.id().as_str());
+            fake.expect("every upstream has a fake").call()
+        })
+        .await;
 
         assert_eq!(answer(&out), Ok("second"), "the retry answered");
+        assert_eq!(*causes.borrow(), ["first", "failover from first"]);
         assert_eq!(
             out.hedge.started, 0,
             "a call pulled in by a failure is a retry, not a hedge — the timer never fired"

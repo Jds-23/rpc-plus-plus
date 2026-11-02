@@ -40,6 +40,14 @@ fn block_number_requests(observer: &MetricsObserver) -> RequestSnapshot {
         .unwrap()
 }
 
+fn failovers(observer: &MetricsObserver) -> Vec<(&str, u64)> {
+    observer
+        .failovers()
+        .into_iter()
+        .map(|(upstream, count)| (upstream.as_str(), count))
+        .collect()
+}
+
 async fn post(addr: &str) -> reqwest::Response {
     reqwest::Client::new()
         .post(format!("{addr}/rpc"))
@@ -159,6 +167,29 @@ async fn a_hedge_and_its_win_land_on_the_overtaken_pair() {
     assert_eq!(fast_to_slow, HedgeSnapshot { started: 0, won: 0 });
 
     assert_eq!(observer.snapshot(&ids[1]).unwrap().success, 1);
+    assert_eq!(
+        failovers(&observer),
+        [("fast", 0), ("slow", 0)],
+        "a hedge is not a failover"
+    );
+}
+
+#[tokio::test]
+async fn a_hedged_failure_is_a_failover_not_a_hedge() {
+    let live = mock_rpc_server::ok("0x1").await;
+    let mut settings = settings(vec![rpc("dead", DEAD_URL), rpc("live", live.uri())]);
+    settings.application.proxy.hedge.enabled = true;
+    settings.application.proxy.hedge.after_in_millis = 500;
+    let (ids, observer) = observer(&["dead", "live"]);
+    let addr = spawn_app_with_observer(settings, observer.clone()).await;
+
+    assert_eq!(post(&addr).await.status(), 200);
+
+    assert_eq!(failovers(&observer), [("dead", 1), ("live", 0)]);
+    assert_eq!(
+        observer.hedge_snapshot(&ids[0], &ids[1]).unwrap(),
+        HedgeSnapshot { started: 0, won: 0 }
+    );
 }
 
 #[tokio::test]
@@ -225,6 +256,7 @@ async fn a_failover_is_one_request_of_two_attempts() {
     assert_eq!((requests.answered, requests.failed), (1, 0));
     assert_eq!(requests.attempt_buckets, [0, 1, 0, 0, 0]);
     assert_eq!(requests.attempts_total, 2);
+    assert_eq!(failovers(&observer), [("dead", 1), ("live", 0)]);
     assert_eq!(
         requests.duration_buckets.iter().sum::<u64>(),
         1,
@@ -242,6 +274,11 @@ async fn an_exhausted_chain_is_a_failed_request() {
 
     let requests = block_number_requests(&observer);
     assert_eq!((requests.answered, requests.failed), (0, 1));
+    assert_eq!(
+        failovers(&observer),
+        [("dead", 0)],
+        "nothing left to fail over to"
+    );
 }
 
 #[tokio::test]
