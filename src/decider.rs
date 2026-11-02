@@ -5,6 +5,7 @@ use crate::upstream::{Upstream, UpstreamId};
 pub mod least_latency;
 pub mod prefer_least_errors;
 pub mod round_robin;
+mod window;
 
 pub trait Decider: Send + Sync + 'static {
     /// Returns up to `max` distinct upstreams, best first.

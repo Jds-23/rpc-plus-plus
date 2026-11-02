@@ -1,7 +1,6 @@
 pub mod refresher;
 
 use std::{
-    collections::VecDeque,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -14,7 +13,9 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    decider::{BuildError, Decider, Ranking, least_latency::refresher::LatencyRefresher},
+    decider::{
+        BuildError, Decider, Ranking, least_latency::refresher::LatencyRefresher, window::Window,
+    },
     observer::MetricsObserver,
     upstream::Upstream,
 };
@@ -64,11 +65,10 @@ impl LeastLatency {
             requests: AtomicU64::new(0),
         });
         let latency_refresher = LatencyRefresher {
-            baseline: VecDeque::from([observer.snapshot_map()]),
+            window: Window::new(observer.snapshot_map(), window, refresh),
             metrics_observer: observer,
             decider: decider.clone(),
             interval: refresh,
-            window_ticks: window,
             min_samples,
             margin: PROMOTION_MARGIN,
             penalty,
