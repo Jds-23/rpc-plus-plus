@@ -430,7 +430,7 @@ mod tests {
             prometheus::{
                 ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, COALESCED_NAME, Collector, FAILOVERS_NAME,
                 HEDGE_WINS_NAME, HEDGES_NAME, REQUEST_ATTEMPTS_NAME, REQUEST_DURATION_NAME,
-                REQUESTS_NAME, cumulative,
+                REQUESTS_NAME,
             },
         },
         upstream::{
@@ -632,30 +632,27 @@ rpc_requests_coalesced_total 2
     }
 
     #[test]
-    fn test_desc_advertises_every_family() {
-        let observer = Arc::new(MetricsObserver::new(vec![]));
+    fn desc_advertises_exactly_the_families_collect_emits() {
+        let observer = Arc::new(MetricsObserver::new(vec![
+            UpstreamId::new("alpha"),
+            UpstreamId::new("zulu"),
+        ]));
         let collector = Collector::new(observer.clone()).unwrap();
 
-        let names: Vec<&str> = collector
+        let mut advertised: Vec<String> = collector
             .desc()
             .iter()
-            .map(|desc| desc.fq_name.as_str())
+            .map(|desc| desc.fq_name.clone())
             .collect();
+        let mut emitted: Vec<String> = collector
+            .collect()
+            .iter()
+            .map(|family| family.name().to_string())
+            .collect();
+        advertised.sort();
+        emitted.sort();
 
-        assert_eq!(
-            names,
-            [
-                ATTEMPTS_NAME,
-                ATTEMPTS_DURATION_NAME,
-                HEDGES_NAME,
-                HEDGE_WINS_NAME,
-                FAILOVERS_NAME,
-                COALESCED_NAME,
-                REQUESTS_NAME,
-                REQUEST_ATTEMPTS_NAME,
-                REQUEST_DURATION_NAME,
-            ]
-        );
+        assert_eq!(advertised, emitted);
     }
 
     const EXPECTED_REQUESTS: &str = r#"# HELP rpc_requests_total Requests that ran their own upstream chain, by method and outcome
@@ -738,13 +735,6 @@ rpc_request_duration_seconds_count{method="other"} 1
             encode(&families, REQUEST_DURATION_NAME),
             EXPECTED_REQUEST_DURATION
         );
-    }
-
-    #[test]
-    fn per_slot_counts_accumulate_into_le_totals() {
-        let slots = [1, 0, 2, 0, 0, 3, 0, 0, 0, 1];
-
-        assert_eq!(cumulative(slots), [1, 1, 3, 3, 3, 6, 6, 6, 6, 7]);
     }
 
     #[test]

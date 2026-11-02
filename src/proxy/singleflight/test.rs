@@ -203,18 +203,32 @@ fn only_the_first_caller_leads() {
     );
 }
 
-#[tokio::test]
-async fn make_runs_outside_the_lock() {
-    let flights = SingleFlight::<bool>::default();
-    let inflight = flights.inflight.clone();
+#[test]
+fn make_can_join_another_flight() {
+    let flights = Arc::new(SingleFlight::<Role>::default());
+    let (tx, rx) = mpsc::channel::<Role>();
 
-    let (flight, _) = flights.join(key("eth_blockNumber"), RequestId::random(), move || {
-        ready(inflight.try_lock().is_ok())
+    thread::spawn({
+        let flights = flights.clone();
+        move || {
+            let inner = flights.clone();
+            let (flight, _) =
+                flights.join(key("eth_blockNumber"), RequestId::random(), move || {
+                    let (_, role) = inner.join(key("eth_chainId"), RequestId::random(), pending);
+                    ready(role)
+                });
+            let role = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(flight);
+            tx.send(role).unwrap();
+        }
     });
 
-    assert!(
-        flight.await,
-        "caller code must not run while the map is locked"
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(1)),
+        Ok(Role::Leader),
+        "caller code that uses the map must not deadlock on it"
     );
 }
 

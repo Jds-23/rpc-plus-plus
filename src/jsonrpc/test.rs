@@ -47,7 +47,7 @@ fn revert_is_final() {
 }
 
 #[test]
-fn clean_result_never_reaches_the_parser() {
+fn a_clean_result_is_not_a_fault() {
     let body = Bytes::from(r#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#);
     assert_eq!(rpc_fault_in(&body), None);
 }

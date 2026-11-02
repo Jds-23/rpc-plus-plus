@@ -370,6 +370,15 @@ application:
         }
     }
 
+    fn rejection(yaml: &str, env: &[(&str, &str)]) -> SettingsError {
+        match parse_with_env(yaml, env) {
+            Ok(_) => panic!("the config should be rejected"),
+            Err(err) => err
+                .downcast::<SettingsError>()
+                .unwrap_or_else(|err| panic!("expected a SettingsError, got {err:#}")),
+        }
+    }
+
     fn upstreams(entries: &[(&str, &str)]) -> String {
         let mut yaml = String::from("upstreams:\n");
         for (label, url) in entries {
@@ -425,19 +434,21 @@ application:
     #[test]
     fn a_zero_hedge_threshold_is_an_error() {
         let yaml = format!("{MINIMAL}  proxy:\n    hedge:\n      after_in_millis: 0\n");
-        let error = error_of(&yaml, &[]);
+        let error = rejection(&yaml, &[]);
 
-        assert!(error.contains("after_in_millis"), "{error}");
+        assert!(matches!(error, SettingsError::ZeroHedgeAfter), "{error}");
     }
 
     #[test]
     fn a_zero_upstream_hedge_threshold_is_rejected_by_label() {
         let yaml = "upstreams:\n  - label: alchemy\n    url: https://eth-mainnet.g.alchemy.com/v2/key\n    hedge_after_in_millis: 0\napplication:\n  port: 8080\n";
-        let error = error_of(yaml, &[]);
+        let error = rejection(yaml, &[]);
 
-        assert!(error.contains("alchemy"), "{error}");
-        assert!(error.contains("hedge_after_in_millis"), "{error}");
-        assert!(!error.contains("alchemy.com"), "{error}");
+        assert!(
+            matches!(&error, SettingsError::ZeroUpstreamHedgeAfter { label } if label == "alchemy"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("alchemy.com"), "{error}");
     }
 
     #[test]
@@ -514,9 +525,9 @@ application:
 
     #[test]
     fn an_empty_upstream_list_is_an_error() {
-        let error = error_of("application:\n  port: 8080\nupstreams: []\n", &[]);
+        let error = rejection("application:\n  port: 8080\nupstreams: []\n", &[]);
 
-        assert!(error.contains("upstreams must not be empty"), "{error}");
+        assert!(matches!(error, SettingsError::EmptyUpstreams), "{error}");
     }
 
     #[test]
@@ -573,18 +584,23 @@ application:
     #[test]
     fn an_unset_variable_fails_startup_and_names_the_variable() {
         let yaml = upstreams(&[("one", "https://provider.example/v2/${ALCHEMY_KEY}")]);
-        let error = error_of(&yaml, &[]);
+        let error = rejection(&yaml, &[]);
 
-        assert!(error.contains("ALCHEMY_KEY"), "{error}");
-        assert!(error.contains("unset"), "{error}");
+        assert!(
+            matches!(&error, SettingsError::UnsetEnvVar(name) if name == "ALCHEMY_KEY"),
+            "{error}"
+        );
     }
 
     #[test]
     fn an_empty_variable_counts_as_unset() {
         let yaml = upstreams(&[("one", "https://provider.example/v2/${ALCHEMY_KEY}")]);
-        let error = error_of(&yaml, &[("ALCHEMY_KEY", "")]);
+        let error = rejection(&yaml, &[("ALCHEMY_KEY", "")]);
 
-        assert!(error.contains("ALCHEMY_KEY"), "{error}");
+        assert!(
+            matches!(&error, SettingsError::UnsetEnvVar(name) if name == "ALCHEMY_KEY"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -602,11 +618,13 @@ application:
     #[test]
     fn an_unterminated_placeholder_is_rejected_by_label() {
         let yaml = upstreams(&[("alchemy", "https://provider.example/v2/${ALCHEMY_KEY")]);
-        let error = error_of(&yaml, &[("ALCHEMY_KEY", "secret")]);
+        let error = rejection(&yaml, &[("ALCHEMY_KEY", "secret")]);
 
-        assert!(error.contains("alchemy"), "{error}");
-        assert!(error.contains("placeholder"), "{error}");
-        assert!(!error.contains("provider.example"), "{error}");
+        assert!(
+            matches!(&error, SettingsError::ResidualPlaceholder { label } if label == "alchemy"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("provider.example"), "{error}");
     }
 
     #[test]
@@ -615,9 +633,12 @@ application:
             ("one", "https://provider.example/a"),
             ("one", "https://provider.example/b"),
         ]);
-        let error = error_of(&yaml, &[]);
+        let error = rejection(&yaml, &[]);
 
-        assert!(error.contains("duplicate label one"), "{error}");
+        assert!(
+            matches!(&error, SettingsError::DuplicateLabel(label) if label == "one"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -626,29 +647,38 @@ application:
             ("alchemy", "https://eth-mainnet.g.alchemy.com/v2/key"),
             ("alchemy-2", "https://eth-mainnet.g.alchemy.com/v2/key"),
         ]);
-        let error = error_of(&yaml, &[]);
+        let error = rejection(&yaml, &[]);
 
         assert!(
-            error.contains("alchemy") && error.contains("alchemy-2"),
+            matches!(
+                &error,
+                SettingsError::DuplicateUrl { first, second } if first == "alchemy" && second == "alchemy-2"
+            ),
             "{error}"
         );
-        assert!(!error.contains("alchemy.com"), "{error}");
+        assert!(!error.to_string().contains("alchemy.com"), "{error}");
     }
 
     #[test]
     fn an_empty_label_is_an_error() {
         let yaml = upstreams(&[("\"\"", "https://provider.example/a")]);
-        let error = error_of(&yaml, &[]);
+        let error = rejection(&yaml, &[]);
 
-        assert!(error.contains("empty label"), "{error}");
+        assert!(
+            matches!(error, SettingsError::EmptyLabel { index: 0 }),
+            "{error}"
+        );
     }
 
     #[test]
     fn an_empty_url_is_an_error() {
         let yaml = upstreams(&[("one", "\"\"")]);
-        let error = error_of(&yaml, &[]);
+        let error = rejection(&yaml, &[]);
 
-        assert!(error.contains("empty url"), "{error}");
+        assert!(
+            matches!(&error, SettingsError::EmptyUrl { label } if label == "one"),
+            "{error}"
+        );
     }
 
     fn with_origins(origins: &[&str]) -> String {
@@ -683,45 +713,53 @@ application:
 
     #[test]
     fn a_wildcard_mixed_with_origins_is_an_error() {
-        let error = error_of(&with_origins(&["https://app.example", "*"]), &[]);
+        let error = rejection(&with_origins(&["https://app.example", "*"]), &[]);
 
-        assert!(error.contains("only entry"), "{error}");
+        assert!(
+            matches!(error, SettingsError::WildcardCorsOriginMixed),
+            "{error}"
+        );
     }
 
     #[test]
     fn a_duplicate_cors_origin_is_an_error() {
-        let error = error_of(
+        let error = rejection(
             &with_origins(&["https://app.example", "https://app.example"]),
             &[],
         );
 
-        assert!(error.contains("duplicate cors origin"), "{error}");
+        assert!(
+            matches!(&error, SettingsError::DuplicateCorsOrigin(origin) if origin == "https://app.example"),
+            "{error}"
+        );
     }
 
     #[test]
     fn a_malformed_cors_origin_is_rejected_by_value() {
         let cases = [
-            ("https://app.example/", "slash"),
-            ("https://app.example/dapp", "exactly"),
-            ("https://app.example?x=1", "exactly"),
-            ("app.example", "scheme://host"),
-            ("ftp://app.example", "http or https"),
-            ("null", "scheme://host"),
-            (" https://app.example", "whitespace"),
-            ("https://App.Example", "lowercase"),
-            ("https://app.example:443", "default port"),
-            ("http://app.example:80", "default port"),
-            ("https://user@app.example", "exactly"),
-            ("https://app.example:08443", "exactly"),
-            ("https://app.example#x", "exactly"),
-            ("https://app.example:", "exactly"),
+            "https://app.example/",
+            "https://app.example/dapp",
+            "https://app.example?x=1",
+            "app.example",
+            "ftp://app.example",
+            "null",
+            " https://app.example",
+            "https://App.Example",
+            "https://app.example:443",
+            "http://app.example:80",
+            "https://user@app.example",
+            "https://app.example:08443",
+            "https://app.example#x",
+            "https://app.example:",
         ];
 
-        for (origin, reason) in cases {
-            let error = error_of(&with_origins(&[origin]), &[]);
+        for origin in cases {
+            let error = rejection(&with_origins(&[origin]), &[]);
 
-            assert!(error.contains(origin.trim()), "{origin}: {error}");
-            assert!(error.contains(reason), "{origin}: {error}");
+            assert!(
+                matches!(&error, SettingsError::InvalidCorsOrigin { origin: rejected, .. } if rejected == origin),
+                "{origin:?}: {error}"
+            );
         }
     }
 

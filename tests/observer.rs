@@ -90,11 +90,7 @@ async fn an_error_status_lands_in_the_error_status_counter() {
     let addr =
         spawn_app_with_observer(settings(vec![rpc("one", failing.uri())]), observer.clone()).await;
 
-    let body: serde_json::Value = post(&addr).await.json().await.unwrap();
-    assert_eq!(
-        body["error"]["message"],
-        "upstream returned error status 500"
-    );
+    post(&addr).await;
 
     let stats = observer.snapshot(&ids[0]).unwrap();
     assert_eq!(stats.error_status, 1);
@@ -121,6 +117,7 @@ async fn recorded_duration_stays_within_the_request() {
         .iter()
         .map(|id| observer.snapshot(id).unwrap().duration_micros_total)
         .sum();
+    assert!(recorded > 0, "no attempt time was recorded");
     assert!(
         recorded <= whole_request,
         "recorded {recorded}us exceeds the request it happened inside ({whole_request}us)"

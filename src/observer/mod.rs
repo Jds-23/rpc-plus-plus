@@ -308,9 +308,9 @@ mod tests {
 
         observer.record(&upstream_id, record);
 
-        let stats = observer.stats.get(&upstream_id).unwrap();
-        assert_eq!(stats.success.load(Ordering::Relaxed), 1);
-        assert_eq!(stats.buckets[4].load(Ordering::Relaxed), 1);
+        let snapshot = observer.snapshot(&upstream_id).unwrap();
+        assert_eq!(snapshot.success, 1);
+        assert_eq!(snapshot.buckets[4], 1);
     }
 
     #[tokio::test]
@@ -325,11 +325,7 @@ mod tests {
 
         observer.record(&upstream_id, record);
 
-        let stats = observer.stats.get(&upstream_id).unwrap();
-        let counts = stats
-            .buckets
-            .each_ref()
-            .map(|bucket| bucket.load(Ordering::Relaxed));
+        let counts = observer.snapshot(&upstream_id).unwrap().buckets;
 
         let mut expected = [0u64; BUCKET_BOUNDS_MICROS.len()];
         expected[3] = 1;
@@ -362,10 +358,9 @@ mod tests {
             handle.await.unwrap();
         }
 
-        let stats = observer.stats.get(&upstream_id).unwrap();
-        assert_eq!(stats.success.load(Ordering::Relaxed), 100);
-
-        assert_eq!(stats.buckets[4].load(Ordering::Relaxed), 100);
+        let snapshot = observer.snapshot(&upstream_id).unwrap();
+        assert_eq!(snapshot.success, 100);
+        assert_eq!(snapshot.buckets[4], 100);
     }
 
     #[tokio::test]
@@ -395,8 +390,7 @@ mod tests {
         }
 
         for upstream_id in upstreams {
-            let stats = observer.stats.get(&upstream_id).unwrap();
-            assert_eq!(stats.success.load(Ordering::Relaxed), 25);
+            assert_eq!(observer.snapshot(&upstream_id).unwrap().success, 25);
         }
     }
 
@@ -437,11 +431,11 @@ mod tests {
             observer.record(&upstream_id, record);
         }
 
-        let stats = observer.stats.get(&upstream_id).unwrap();
-        assert_eq!(stats.success.load(Ordering::Relaxed), 1);
-        assert_eq!(stats.error_status.load(Ordering::Relaxed), 1);
-        assert_eq!(stats.read_failed.load(Ordering::Relaxed), 1);
-        assert_eq!(stats.unreachable.load(Ordering::Relaxed), 1);
+        let snapshot = observer.snapshot(&upstream_id).unwrap();
+        assert_eq!(snapshot.success, 1);
+        assert_eq!(snapshot.error_status, 1);
+        assert_eq!(snapshot.read_failed, 1);
+        assert_eq!(snapshot.unreachable, 1);
     }
 
     #[test]
@@ -640,9 +634,14 @@ mod tests {
             observer.record(&upstream_id, record);
         }
 
-        let stats = observer.stats.get(&upstream_id).unwrap();
         let total: u64 = durations.iter().sum();
-        assert_eq!(stats.duration_micros_total.load(Ordering::Relaxed), total);
+        assert_eq!(
+            observer
+                .snapshot(&upstream_id)
+                .unwrap()
+                .duration_micros_total,
+            total
+        );
     }
 
     #[tokio::test]
@@ -674,9 +673,11 @@ mod tests {
             handle.await.unwrap();
         }
 
-        let stats = observer.stats.get(&upstream_id).unwrap();
         assert_eq!(
-            stats.duration_micros_total.load(Ordering::Relaxed),
+            observer
+                .snapshot(&upstream_id)
+                .unwrap()
+                .duration_micros_total,
             expected_total
         );
     }
