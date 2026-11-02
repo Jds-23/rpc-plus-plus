@@ -84,16 +84,16 @@ async fn works_fine_when_one_uptream_works() {
 }
 
 #[tokio::test]
-async fn non_works_fine_retry_and_propagate_last_error() {
+async fn every_upstream_failing_returns_the_last_error() {
     let a = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
-    let b = mock_rpc_server::failing(StatusCode::SERVICE_UNAVAILABLE).await;
+    let b = mock_rpc_server::failing(StatusCode::BAD_GATEWAY).await;
     let mut settings = test_settings(vec![rpc("one", a.uri()), rpc("two", b.uri())]);
     settings.application.proxy.max_attempt = 2;
     settings.application.proxy.retry_after_in_secs = 0;
     let addr = spawn_app(settings).await;
 
     let client = reqwest::Client::new();
-    for _ in 0..4 {
+    for index in 0..4 {
         let res = client
             .post(format!("{addr}/rpc"))
             .json(&json!({"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}))
@@ -103,6 +103,16 @@ async fn non_works_fine_retry_and_propagate_last_error() {
         assert!(res.status().is_success());
         let body: serde_json::Value = res.json().await.unwrap();
         assert_eq!(body["error"]["code"], -32603);
+        let (last, first) = if index % 2 == 0 {
+            ("502", "503")
+        } else {
+            ("503", "502")
+        };
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains(last) && !message.contains(first),
+            "request {index}: expected the second upstream's {last}, got {message:?}"
+        );
     }
 
     assert_eq!(a.received_requests().await.unwrap().len(), 4);

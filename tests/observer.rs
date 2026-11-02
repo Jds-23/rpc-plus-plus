@@ -121,6 +121,7 @@ async fn recorded_duration_stays_within_the_request() {
         .iter()
         .map(|id| observer.snapshot(id).unwrap().duration_micros_total)
         .sum();
+    assert!(recorded > 0, "no attempt time was recorded");
     assert!(
         recorded <= whole_request,
         "recorded {recorded}us exceeds the request it happened inside ({whole_request}us)"
