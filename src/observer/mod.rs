@@ -32,6 +32,8 @@ pub trait Observer: Send + Sync + 'static {
     /// The hedge from `overtaken` to `to` answered first.
     fn record_hedge_win(&self, overtaken: &UpstreamId, to: &UpstreamId);
     fn record_coalesced(&self);
+    /// `from` failed retryably and the chain moved on to the next upstream.
+    fn record_failover(&self, from: &UpstreamId);
     /// Once per request that ran its own chain, however it ended.
     fn record_request(
         &self,
@@ -46,6 +48,7 @@ pub struct MetricsObserver {
     stats: HashMap<UpstreamId, Arc<UpstreamStats>>,
     hedges: HashMap<(UpstreamId, UpstreamId), Arc<HedgeStats>>,
     coalesced: AtomicU64,
+    failovers: HashMap<UpstreamId, AtomicU64>,
     requests: HashMap<&'static str, RequestStats>,
 }
 
@@ -64,10 +67,15 @@ impl MetricsObserver {
                 );
             }
         }
+        let failovers = stats
+            .keys()
+            .map(|upstream| (upstream.clone(), AtomicU64::new(0)))
+            .collect();
         MetricsObserver {
             stats,
             hedges,
             coalesced: AtomicU64::new(0),
+            failovers,
             requests: method_labels()
                 .map(|method| (method, RequestStats::default()))
                 .collect(),
@@ -120,6 +128,17 @@ impl MetricsObserver {
         self.coalesced.load(Ordering::Relaxed)
     }
 
+    /// Sorted by upstream label, like `snapshots`.
+    pub fn failovers(&self) -> Vec<(&UpstreamId, u64)> {
+        let mut out: Vec<_> = self
+            .failovers
+            .iter()
+            .map(|(upstream, count)| (upstream, count.load(Ordering::Relaxed)))
+            .collect();
+        out.sort_unstable_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+        out
+    }
+
     pub fn requests(&self) -> Vec<(&'static str, RequestSnapshot)> {
         let mut out: Vec<_> = self
             .requests
@@ -154,6 +173,14 @@ impl Observer for MetricsObserver {
 
     fn record_coalesced(&self) {
         self.coalesced.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_failover(&self, from: &UpstreamId) {
+        let Some(count) = self.failovers.get(from) else {
+            warn!(event = "metrics_upstream_unknown", upstream = %from);
+            return;
+        };
+        count.fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_request(
@@ -500,6 +527,23 @@ mod tests {
         observer.record_coalesced();
 
         assert_eq!(observer.coalesced(), 2);
+    }
+
+    #[test]
+    fn failovers_are_counted_by_the_upstream_left_behind() {
+        let observer = create_observer();
+        let one = UpstreamId::new("upstream-1");
+
+        observer.record_failover(&one);
+        observer.record_failover(&one);
+        observer.record_failover(&UpstreamId::new("unknown"));
+
+        let counts: Vec<(&str, u64)> = observer
+            .failovers()
+            .into_iter()
+            .map(|(upstream, count)| (upstream.as_str(), count))
+            .collect();
+        assert_eq!(counts, [("upstream-1", 2), ("upstream-2", 0)]);
     }
 
     #[test]
