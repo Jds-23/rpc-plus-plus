@@ -7,6 +7,9 @@ use serde_json::{Value, value::RawValue};
 use xxhash_rust::xxh3::Xxh3;
 
 pub(crate) const JSONRPC_INTERNAL_ERROR: i64 = -32603;
+const LIMIT_EXCEEDED: i64 = -32005;
+const RESOURCE_UNAVAILABLE: i64 = -32002;
+const GETH_SERVER_ERROR: i64 = -32000;
 
 pub enum Shape {
     Batch,
@@ -65,9 +68,9 @@ pub(crate) fn rpc_fault_in(body: &Bytes) -> Option<RpcFault> {
 
 fn is_retryable(code: i64, message: &[u8]) -> bool {
     match code {
-        -32005 | -32002 | -32603 => true,
+        LIMIT_EXCEEDED | RESOURCE_UNAVAILABLE | JSONRPC_INTERNAL_ERROR => true,
         // geth's catch-all. A revert is deterministic — every upstream reverts it.
-        -32000 => REVERTED.find(message).is_none(),
+        GETH_SERVER_ERROR => REVERTED.find(message).is_none(),
         _ => false,
     }
 }

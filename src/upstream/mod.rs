@@ -15,7 +15,7 @@ use crate::{
     upstream::call::{CallError, CallOutcome, CallResult, error_chain},
 };
 
-const DEFAULT_RPC_TIMEOUT_IN_SECS: u64 = 3;
+pub(crate) const DEFAULT_RPC_TIMEOUT_IN_SECS: u64 = 3;
 const DEFAULT_HEDGE_AFTER_IN_MILLIS: u64 = 250;
 
 const POOL_MAX_IDLE_PER_HOST: usize = 32;
@@ -139,14 +139,14 @@ impl Upstream {
 
     async fn call_inner(&self, body: &Bytes) -> Result<CallOutcome, CallError> {
         let res = self.send(body).await.map_err(|err| {
-            let error = error_chain(&err.without_url());
+            let error = error_chain(err);
             CallError::Unreachable { error }
         })?;
 
         let http_status = res.status();
 
         let body = res.bytes().await.map_err(|err| {
-            let error = error_chain(&err.without_url());
+            let error = error_chain(err);
             CallError::ReadFailed { http_status, error }
         })?;
 
