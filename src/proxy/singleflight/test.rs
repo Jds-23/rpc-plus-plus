@@ -1,9 +1,12 @@
 use std::{
     future::{Pending, Ready, pending, ready},
+    pin::Pin,
     sync::{
+        Mutex,
         atomic::{AtomicUsize, Ordering},
         mpsc,
     },
+    task::{Context, Poll},
     thread,
     time::Duration,
 };
@@ -299,5 +302,60 @@ fn a_stale_evict_spares_its_replacement() {
     assert!(
         matches!(role, Role::Follower { .. }),
         "the live flight is still joinable"
+    );
+}
+
+struct OnDrop<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> Future for OnDrop<F> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+        Poll::Pending
+    }
+}
+
+impl<F: FnOnce()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(on_drop) = self.0.take() {
+            on_drop();
+        }
+    }
+}
+
+#[test]
+fn an_abandoned_flight_is_replaced_before_its_evict_runs() {
+    let flights = Arc::new(SingleFlight::<()>::default());
+    let rejoined = Arc::new(Mutex::new(None));
+
+    let (mut abandoned, _) = flights.join(key("eth_blockNumber"), RequestId::random(), {
+        let flights = flights.clone();
+        let rejoined = rejoined.clone();
+        move || {
+            OnDrop(Some(move || {
+                assert_eq!(flights.len(), 1, "the evict ran before the rejoin");
+                let joined = flights.join(key("eth_blockNumber"), RequestId::random(), pending);
+                *rejoined.lock().unwrap() = Some(joined);
+            }))
+        }
+    });
+    assert!((&mut abandoned).now_or_never().is_none());
+    drop(abandoned);
+
+    let (_replacement, role) = rejoined
+        .lock()
+        .unwrap()
+        .take()
+        .expect("dropping the run rejoins the key");
+    assert_eq!(role, Role::Leader, "an abandoned flight was followed");
+    assert_eq!(
+        flights.len(),
+        1,
+        "the abandoned flight's evict removed its replacement"
+    );
+    let (_, role) = flights.join(key("eth_blockNumber"), RequestId::random(), pending);
+    assert!(
+        matches!(role, Role::Follower { .. }),
+        "the replacement is joinable"
     );
 }
