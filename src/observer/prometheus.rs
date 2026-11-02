@@ -25,6 +25,8 @@ const HEDGES_HELP: &str =
 const HEDGE_WINS_NAME: &str = "rpc_hedge_wins_total";
 const HEDGE_WINS_HELP: &str =
     "Hedge calls that overtook this upstream and answered first, by the upstream hedged to";
+const FAILOVERS_NAME: &str = "rpc_failovers_total";
+const FAILOVERS_HELP: &str = "Times the chain moved past this upstream after a retryable failure";
 const COALESCED_NAME: &str = "rpc_requests_coalesced_total";
 const COALESCED_HELP: &str = "Requests answered by another request's flight";
 const REQUESTS_NAME: &str = "rpc_requests_total";
@@ -47,6 +49,7 @@ pub struct Collector {
     attempts_duration_desc: Desc,
     hedges_desc: Desc,
     hedge_wins_desc: Desc,
+    failovers_desc: Desc,
     coalesced_desc: Desc,
     requests_desc: Desc,
     request_attempts_desc: Desc,
@@ -69,6 +72,12 @@ impl Collector {
         )?;
         let hedges_desc = pair_desc(HEDGES_NAME, HEDGES_HELP)?;
         let hedge_wins_desc = pair_desc(HEDGE_WINS_NAME, HEDGE_WINS_HELP)?;
+        let failovers_desc = Desc::new(
+            FAILOVERS_NAME.to_string(),
+            FAILOVERS_HELP.to_string(),
+            vec!["upstream".to_string()],
+            HashMap::new(),
+        )?;
         let coalesced_desc = Desc::new(
             COALESCED_NAME.to_string(),
             COALESCED_HELP.to_string(),
@@ -99,6 +108,7 @@ impl Collector {
             attempts_duration_desc,
             hedges_desc,
             hedge_wins_desc,
+            failovers_desc,
             coalesced_desc,
             requests_desc,
             request_attempts_desc,
@@ -166,6 +176,16 @@ impl PrometheusCollector for Collector {
                 per_pair(|hedge| hedge.won),
             ),
             family(
+                FAILOVERS_NAME,
+                FAILOVERS_HELP,
+                MetricType::COUNTER,
+                self.observer
+                    .failovers()
+                    .into_iter()
+                    .map(|(upstream, count)| upstream_counter_metric(upstream.as_str(), count))
+                    .collect(),
+            ),
+            family(
                 COALESCED_NAME,
                 COALESCED_HELP,
                 MetricType::COUNTER,
@@ -218,6 +238,7 @@ impl PrometheusCollector for Collector {
             &self.attempts_duration_desc,
             &self.hedges_desc,
             &self.hedge_wins_desc,
+            &self.failovers_desc,
             &self.coalesced_desc,
             &self.requests_desc,
             &self.request_attempts_desc,
@@ -361,6 +382,18 @@ fn request_counter_metric(method: &str, outcome: &str, value: u64) -> Metric {
     }
 }
 
+fn upstream_counter_metric(upstream: &str, value: u64) -> Metric {
+    Metric {
+        label: vec![label("upstream", upstream)],
+        counter: Counter {
+            value: Some(value as f64),
+            ..Default::default()
+        }
+        .into(),
+        ..Default::default()
+    }
+}
+
 fn unlabelled_counter_metric(value: u64) -> Metric {
     Metric {
         counter: Counter {
@@ -395,9 +428,9 @@ mod tests {
         observer::{
             MetricsObserver, Observer,
             prometheus::{
-                ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, COALESCED_NAME, Collector, HEDGE_WINS_NAME,
-                HEDGES_NAME, REQUEST_ATTEMPTS_NAME, REQUEST_DURATION_NAME, REQUESTS_NAME,
-                cumulative,
+                ATTEMPTS_DURATION_NAME, ATTEMPTS_NAME, COALESCED_NAME, Collector, FAILOVERS_NAME,
+                HEDGE_WINS_NAME, HEDGES_NAME, REQUEST_ATTEMPTS_NAME, REQUEST_DURATION_NAME,
+                REQUESTS_NAME, cumulative,
             },
         },
         upstream::{
@@ -545,6 +578,28 @@ rpc_hedge_wins_total{upstream="zulu",to="alpha"} 0
         assert_eq!(encode(&families, HEDGE_WINS_NAME), EXPECTED_HEDGE_WINS);
     }
 
+    const EXPECTED_FAILOVERS: &str = r#"# HELP rpc_failovers_total Times the chain moved past this upstream after a retryable failure
+# TYPE rpc_failovers_total counter
+rpc_failovers_total{upstream="alpha"} 2
+rpc_failovers_total{upstream="zulu"} 0
+"#;
+
+    #[test]
+    fn failovers_are_counted_per_upstream_left_behind() {
+        let zulu = UpstreamId::new("zulu");
+        let alpha = UpstreamId::new("alpha");
+        let observer = Arc::new(MetricsObserver::new(vec![zulu, alpha.clone()]));
+        let collector = Collector::new(observer.clone()).unwrap();
+
+        observer.record_failover(&alpha);
+        observer.record_failover(&alpha);
+
+        assert_eq!(
+            encode(&collector.collect(), FAILOVERS_NAME),
+            EXPECTED_FAILOVERS
+        );
+    }
+
     const EXPECTED_COALESCED: &str = r#"# HELP rpc_requests_coalesced_total Requests answered by another request's flight
 # TYPE rpc_requests_coalesced_total counter
 rpc_requests_coalesced_total 2
@@ -594,6 +649,7 @@ rpc_requests_coalesced_total 2
                 ATTEMPTS_DURATION_NAME,
                 HEDGES_NAME,
                 HEDGE_WINS_NAME,
+                FAILOVERS_NAME,
                 COALESCED_NAME,
                 REQUESTS_NAME,
                 REQUEST_ATTEMPTS_NAME,
