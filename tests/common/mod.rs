@@ -70,7 +70,7 @@ pub fn upstreams(settings: &Settings) -> Vec<Upstream> {
 
     let http = build_http_client(&settings.application.proxy).expect("http client build failed");
 
-    build_all(upstreams, http, &settings.application.proxy)
+    build_all(upstreams, http, &settings.application.proxy).expect("upstreams build failed")
 }
 
 fn round_robin(settings: &Settings) -> Arc<dyn Decider> {
