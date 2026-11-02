@@ -77,7 +77,7 @@ impl RankingRefresher {
                 let key = if window.answered() < self.min_samples {
                     SortKey::unscored()
                 } else if incumbent == Some(id) {
-                    SortKey::scored(window.error_rate() * self.margin)
+                    SortKey::scored(window.error_rate() * (1.0 - self.margin))
                 } else {
                     SortKey::scored(window.error_rate())
                 };

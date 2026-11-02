@@ -83,7 +83,7 @@ impl LatencyRefresher {
                 let key = match score {
                     None => SortKey::unscored(),
                     Some(score) if incumbent == Some(id) => {
-                        SortKey::scored(score.mul_f64(self.margin))
+                        SortKey::scored(score.mul_f64(1.0 - self.margin))
                     }
                     Some(score) => SortKey::scored(score),
                 };

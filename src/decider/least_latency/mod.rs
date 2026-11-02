@@ -25,7 +25,7 @@ pub const WINDOW_DEFAULT: usize = 4;
 
 const MIN_WINDOW_SAMPLES: u64 = 20;
 
-const PROMOTION_MARGIN: f64 = 0.8;
+const PROMOTION_MARGIN: f64 = 0.20;
 
 const PROBE_EVERY: u64 = 20;
 
