@@ -1,161 +1,162 @@
 # rpc-plus-plus
 
-An Ethereum JSON-RPC proxy that sits between your app and N upstream providers.
-
-## Why
-
-Apps hardcode a single RPC URL. When that provider rate-limits, slows down, or goes dark, the outage reaches users directly — and the fix is a manual endpoint swap and a redeploy. Every service ends up managing its own list of URLs, and when a request fails there is no single place that says which upstream failed or why.
-
-## Goals
-
-- **Provider outages do not reach users.** If at least one upstream is healthy, the caller should not see the failure.
-- **One request is debuggable from logs alone.** Follow a single `request_id` across every upstream attempt and see which provider failed, with what status, and how long it took.
-
-## Status — v0.4
-
-Round-robin or error-rate-ranked selection across upstreams, with retry failover. Two opt-in layers on top: hedging races a second upstream when the first is slow, and dedup coalesces concurrent identical reads into one upstream call.
-
-| | |
-|---|---|
-| `POST /rpc` | Raw JSON-RPC passthrough. Batches rejected with HTTP 400 |
-| `GET /healthz` | Liveness |
-| `GET /metrics` | Prometheus exposition: requests by outcome, attempts per request, attempts by outcome, attempt duration, hedges, hedge wins, coalesced requests |
-
-Deliberately not here yet: caching, least-latency routing, auth, multichain. Each release's known gaps are listed in its design doc under [docs/design/](docs/design/) — read them before deploying this anywhere real.
-
-## Run
-
-```sh
-cp settings.example.yaml settings.yaml   # then fill in your upstreams
-export ALCHEMY_KEY=...                   # or write it to a gitignored .env
-cargo run
+```
+██████╗  ██████╗   ██████╗
+██╔══██╗ ██╔══██╗ ██╔════╝     ██╗       ██╗
+██████╔╝ ██████╔╝ ██║       ████████╗ ████████╗
+██╔══██╗ ██╔═══╝  ██║       ╚══██╔══╝ ╚══██╔══╝
+██║  ██║ ██║      ╚██████╗     ╚═╝       ╚═╝
+╚═╝  ╚═╝ ╚═╝       ╚═════╝
+  one RPC URL in front of every Ethereum provider you use
 ```
 
-`settings.yaml` is gitignored — a URL written out in full embeds the API key in its path.
+[![CI](https://github.com/Jds-23/rpc-plus-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/Jds-23/rpc-plus-plus/actions/workflows/ci.yml)
 
-```yaml
-application:
-  port: 8080                  # required
-  host: 127.0.0.1             # default 127.0.0.1
-  proxy:
-    max_attempt: 3            # default 3
-    retry_after_in_secs: 1    # default 1
-    rpc_timeout_in_secs: 3    # default 3
-    hedge:
-      enabled: false          # default false
-      after_in_millis: 250    # default 250
-    dedup:
-      enabled: false          # default false
-  cors:
-    allowed_origins: []       # default [], no CORS
+rpc-plus-plus is an Ethereum JSON-RPC proxy written in Rust. Your app sends its calls to the proxy. The proxy picks an upstream for each call, such as Alchemy, dRPC, or your own node, and moves to the next upstream when one fails.
 
-upstreams:                    # required, at least one
-  - label: alchemy
-    url: https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_KEY}
-    hedge_after_in_millis: 400  # optional, overrides hedge.after_in_millis
-  - label: drpc
-    url: https://lb.drpc.org/ogrpc?network=ethereum&dkey=${DRPC_KEY}
-
-decider: ROUND_ROBIN          # default ROUND_ROBIN, or PREFER_LEAST_ERRORS
+```mermaid
+flowchart LR
+	app[Your app] -->|POST /rpc| proxy[rpc-plus-plus]
+	proxy -->|attempt 1| a[alchemy]
+	proxy -.->|attempt 2, after a 429 or 5xx| b[drpc]
+	proxy -.->|attempt 3| c[your node]
+	proxy -->|GET /metrics| prom[Prometheus and Grafana]
 ```
 
-Only `application.port` and `upstreams` are required. Upstreams are referred to by `label` everywhere in the logs; the URL is never logged.
+## Why a proxy in front of your providers
 
-`decider` picks the selection strategy. `ROUND_ROBIN` hands out every upstream in turn. `PREFER_LEAST_ERRORS` ranks them by error rate over a rolling window and re-ranks on a 15s timer, logging a `ranking_rebuilt` line each time. An unrecognised value is rejected while the config is read.
+Most apps hardcode one RPC URL. That one provider then decides your uptime. When it returns `429`, takes two seconds to answer, or stops answering, your users see the failure. The fix is a manual URL swap and a redeploy, made while the outage is still happening.
 
-`hedge` races the next upstream in the chain once the current one has gone `after_in_millis` without answering, and takes whichever answers first. Writes are never hedged. `after_in_millis` and every per-upstream override must be at least 1. Hedges show up as `rpc_hedges_total` and `rpc_hedge_wins_total`, labelled by the overtaken `upstream` and the one hedged `to`. Design: [v0.3-HEDGING.md](docs/design/v0.3-HEDGING.md).
+Adding a second URL to the app does not solve the problem. Every service then carries its own list of URLs and its own retry code. When a call fails, no single place records which provider failed, with what error, or how long it took.
 
-`dedup` makes concurrent requests with the same `method` and `params` share one upstream call. Each caller still gets its own `id` back. Only idempotent reads are coalesced; writes, notifications and unknown methods always run on their own. It is not a cache: a request arriving after the shared call finished makes a fresh one. Hedging and dedup compose. Every request answered by another's call counts towards `rpc_requests_coalesced_total`, and logs a `request_coalesced` line carrying the `leader_request_id` whose upstream attempts it shared. Design: [v0.4-DEDUP.md](docs/design/v0.4-DEDUP.md).
+rpc-plus-plus moves the list of providers and the retry rules out of the app and into one service. The app keeps one URL. The proxy picks a provider for each call, and it moves to the next provider when a call fails. The proxy also logs and counts every call that it makes. A provider outage becomes a line on a dashboard instead of an incident.
 
-`cors.allowed_origins` lets browser dapps on those origins call `/rpc`. Empty means no CORS headers at all, which is the behaviour from before CORS existed. `["*"]` allows any origin, and `*` must be the only entry. Every origin has to be written exactly as browsers send it in `Origin`: lowercase `scheme://host[:port]`, with no path, no trailing slash and no default port. Any other spelling could never match, so it fails startup. Only `POST` with a `Content-Type` header is allowed, and browsers may cache the preflight for an hour. CORS only decides which pages can read the responses. It is not access control, because curl and backends ignore it.
+## What you can do with it
 
-The pre-rename spellings still load. `rpcs:` and `rpc_url:` are accepted silently as aliases for `upstreams:` and `url:`; a top-level `rpc_timeout_in_secs` still wins over the one under `application.proxy` and logs one `config_key_deprecated` warn at startup.
+With rpc-plus-plus in front of your providers, you can do the following:
 
-`${VAR}` is expanded from the environment at startup, so keys stay out of the file. An unset or empty variable stops startup with a `startup_failed` line naming the **variable** — never the URL. A bare `$VAR` is literal text; the braces are required. Labels must be unique, and no two upstreams may share a URL: both are startup failures, since a duplicate label merges two providers into one identity and a duplicate URL turns failover into the same provider twice.
+- **Survive a provider outage.** If an upstream times out, can't be reached, or returns HTTP `429` or `5xx`, the proxy retries the call on the next upstream, up to `max_attempt` attempts. A JSON-RPC error that the upstream marks as not retryable, such as a reverted call, goes straight back to the caller.
+- **Route to the fastest provider.** The `LEAST_LATENCY` decider ranks upstreams by their recent response time and sends new calls to the fastest one. `PREFER_LEAST_ERRORS` ranks them by error rate instead. `ROUND_ROBIN` gives each upstream a turn.
+- **Cut tail latency.** With hedging on, the proxy sends a read to a second upstream when the first one is slow to answer. The first answer wins. The proxy never hedges writes.
+- **Send fewer duplicate calls.** With dedup on, concurrent calls that have the same `method` and `params` share one upstream call. Each caller still gets a response with its own `id`.
+- **Debug one call from the logs.** Every log line carries a `request_id`. Follow it to see which upstream the proxy tried, what each one returned, and how long each attempt took. Logs name an upstream by its `label` and never print its URL, so API keys stay out of the logs.
+- **Watch the whole fleet on one dashboard.** `GET /metrics` serves Prometheus metrics, and `docker compose` starts a Grafana dashboard that already shows them.
+- **Serve browser dapps.** CORS settings let pages on the origins that you list call `/rpc`.
 
-Set `RPC_CONFIG_PATH` to read the config from somewhere other than `./settings.yaml`.
+## How a call moves through rpc-plus-plus
 
-`application.host` stays on loopback unless you widen it deliberately — inside a container it has to be `0.0.0.0`. There is no auth yet, so a reachable proxy is an open relay spending your upstream API keys.
+```
+            your app
+               │  POST /rpc
+               ▼
+ ┌──────────────────────────────────────────────────────────────┐
+ │ http/        CORS check, then hand the body to the Pipeline  │
+ ├──────────────────────────────────────────────────────────────┤
+ │ proxy/       new request_id                                  │
+ │              batch or malformed body ──────────▶ HTTP 400    │
+ ├──────────────────────────────────────────────────────────────┤
+ │ dedup        same read method and params in flight?          │
+ │ (opt-in)       yes ──▶ wait for that call, reply with own id │
+ │                no  ──▶ continue                              │
+ ├──────────────────────────────────────────────────────────────┤
+ │ decider/     order the upstreams, cut to max_attempt         │
+ │              ROUND_ROBIN, PREFER_LEAST_ERRORS, LEAST_LATENCY │
+ ├──────────────────────────────────────────────────────────────┤
+ │ dispatch     hedge off       ──▶ walk the chain, fail over   │
+ │              hedge on, read  ──▶ race the next upstream      │
+ │              hedge on, write ──▶ one upstream, no retry      │
+ └──────────────┬──────────────────┬──────────────────┬─────────┘
+                ▼                  ▼                  ▼
+           ┌─────────┐        ┌─────────┐        ┌───────────┐
+           │ alchemy │        │  drpc   │        │ your node │
+           └─────────┘        └─────────┘        └───────────┘
 
-## Develop
+ observer/    every attempt and request ──▶ GET /metrics
+              every step               ──▶ logs tagged with request_id
+```
 
-Checks run through [`just`](https://github.com/casey/just) and [`cargo-nextest`](https://nexte.st), the same recipes CI uses:
+## See a failover in the logs
+
+Here is one `eth_blockNumber` call during an Alchemy rate limit, as JSON logs with the `timestamp` and `target` fields removed. All four lines carry the same `request_id`.
+
+```json
+{"level":"INFO","event":"attempt_started","attempt":1,"upstream":"alchemy","hedge":false,"span":{"request_id":"6f0c2a9e-4b1d-4f7a-9c3e-2d8b5a1e7f40","name":"proxy"}}
+{"level":"WARN","event":"attempt_failed","attempt":1,"upstream":"alchemy","duration_ms":41,"http_status":429,"error":"upstream returned error status","span":{"request_id":"6f0c2a9e-4b1d-4f7a-9c3e-2d8b5a1e7f40","name":"proxy"}}
+{"level":"INFO","event":"attempt_started","attempt":2,"upstream":"drpc","hedge":false,"span":{"request_id":"6f0c2a9e-4b1d-4f7a-9c3e-2d8b5a1e7f40","name":"proxy"}}
+{"level":"INFO","event":"attempt_succeeded","attempt":2,"upstream":"drpc","duration_ms":87,"http_status":200,"response_bytes":42,"span":{"request_id":"6f0c2a9e-4b1d-4f7a-9c3e-2d8b5a1e7f40","name":"proxy"}}
+```
+
+The app got a normal response from `drpc`. The logs show why Alchemy didn't answer and how long each attempt took. `rpc_failovers_total{upstream="alchemy"}` goes up by one.
+
+## Try it
+
+In this section, you start the proxy against two public Ethereum endpoints and send it a call. You need a Rust toolchain.
+
+1. Create `settings.yaml` with two upstreams:
+
+    ```yaml
+    application:
+      port: 8080
+    upstreams:
+      - label: publicnode
+        url: https://ethereum-rpc.publicnode.com
+      - label: drpc
+        url: https://eth.drpc.org
+    decider: LEAST_LATENCY
+    ```
+
+2. Start the proxy:
+
+    ```sh
+    cargo run
+    ```
+
+    The last startup line has `event="startup_ready"` and `upstreams=2`. In a terminal, the logs are text. When stdout is not a terminal, the logs are JSON lines.
+
+3. In a second terminal, ask for the latest block number:
+
+    ```sh
+    curl -s http://127.0.0.1:8080/rpc \
+    	-H 'Content-Type: application/json' \
+    	-d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}'
+    ```
+
+    The response is a normal JSON-RPC response, for example `{"jsonrpc":"2.0","id":1,"result":"0x15f3a2c"}`.
+
+4. Look at the proxy logs. One `attempt_started` line and one `attempt_succeeded` line share the `request_id` of your call, and they name the upstream that answered.
+
+To use your own providers, copy `settings.example.yaml` to `settings.yaml`. Put API keys in environment variables and refer to them as `${ALCHEMY_KEY}` in the URL. `settings.yaml` is gitignored because a URL with a key in it is a secret.
+
+## Know the limits before you deploy
+
+The proxy has no authentication. If the proxy is reachable from outside your network, anyone can send calls that spend your upstream API keys. `application.host` defaults to `127.0.0.1` for this reason. Change it only when something in front of the proxy controls access.
+
+The proxy does not do the following yet:
+
+- It does not cache responses. Dedup shares a call only while it is still in flight.
+- It does not accept JSON-RPC batches. A batch gets HTTP `400`.
+- It serves one chain per process.
+
+Each design doc under [docs/design/](docs/design/) lists the known gaps of its release.
+
+## Find the details
+
+- [Configuration reference](docs/configuration.md): every setting, its default, and the startup checks.
+- [Metrics and dashboard reference](docs/metrics.md): every metric, its labels, and the Grafana panels.
+- [Source layout](docs/layout.md): what each module in `src/` does, and the names that changed in v0.2.1.
+- [Product spec](docs/spec.md): the full feature set the project aims at.
+- [Comparison with eRPC](docs/erpc-comparison.md) and [eRPC gaps ranked by value for effort](docs/erpc-gap-priorities.md).
+- Design docs: [v0.1](docs/design/v0.1.md) with the log schema, [error-rate decider](docs/design/v0.2.1-DECIDER.md), [hedging](docs/design/v0.3-HEDGING.md), [dedup](docs/design/v0.4-DEDUP.md), and [least-latency decider](docs/design/v0.5-LATENCY.md).
+
+## Contribute
+
+The checks run through [`just`](https://github.com/casey/just) and [`cargo-nextest`](https://nexte.st). CI runs the same recipes.
 
 ```sh
-just ci                  # fmt-check, clippy, tests, doctests
-just test observer       # tests matching a filter
+just ci                  # fmt-check, clippy, tests, and doctests
+just test observer       # tests that match a filter
 just test-file cors      # one tests/<name>.rs file
-just fix                 # cargo fmt + clippy --fix
+just fix                 # cargo fmt and clippy --fix
 ```
 
-## Dashboard
-
-```sh
-docker compose up -d --build   # proxy on :8080, Prometheus on :9090, Grafana on :3000
-scripts/load.sh -u http://127.0.0.1:8080
-```
-
-Grafana opens on the provisioned **rpc-plus-plus** dashboard without a login (anonymous Viewer; `admin`/`admin` to edit). The Prometheus datasource and the dashboard are files under [docker/grafana/](docker/grafana/), so they come back on every `docker compose up`.
-
-![rpc-plus-plus Grafana dashboard](docs/images/grafana-dashboard.png)
-
-| Panel | From |
-|---|---|
-| Request rate, requests by outcome | `rpc_requests_total{method,outcome}` + `rpc_requests_coalesced_total` |
-| Attempts by outcome | `rpc_attempts_total{outcome,upstream}` |
-| Request duration p50 / p95 / p99, p95 by method | `rpc_request_duration_seconds` |
-| Requests by method, failure ratio by method | `rpc_requests_total{method,outcome}` |
-| p50 / p95 / p99 per upstream | `rpc_attempt_duration_seconds` |
-| Error rate by upstream | failed answers over all answers in `rpc_attempts_total`; abandoned calls left out |
-| Attempt errors by kind | `rpc_attempts_total` by `upstream` and failed `outcome` |
-| Failover ratio, Failover | `rpc_failovers_total{upstream}`: the chain moved past that upstream after a retryable failure; hedges not counted |
-| Hedges, hedge win rate | `rpc_hedges_total`, `rpc_hedge_wins_total` by overtaken `upstream` |
-
-`rpc_requests_total` counts each request that ran its own upstream chain, once, however it ended; a coalesced follower shows up in `rpc_requests_coalesced_total` instead, and a rejected batch in neither. `rpc_request_attempts` is how many upstream calls that chain made. With hedging on, a hedge is an attempt too, so "more than one attempt" means failover *or* a hedge; `rpc_failovers_total` counts failovers alone. `rpc_request_duration_seconds` times that same chain end to end, from receiving the request to its answer, failovers and hedges included.
-
-All three carry `method`: one of the known read and send methods, or `other` for anything else, so the label can't grow with what callers send. A method only appears on `/metrics` once a request for it has run.
-
-## Layout
-
-```
-src/
-  main.rs        init, load, build, run, and the signal watcher
-  app.rs         composition root — Application, build_decider, build
-  config.rs      settings.yaml -> Settings: env expansion, validation
-  jsonrpc.rs     the wire format: request shape, write detection, dedup key, re-addressing
-  telemetry.rs   tracing subscriber
-  http/          the axum surface — build_router plus one handler per route
-  proxy/         Pipeline: the retry loop; attempt.rs one call, hedge.rs the race,
-                 reply.rs the shared answer, singleflight/ the in-flight dedup map
-  upstream/      Upstream, UpstreamId, build_all; call.rs holds the per-call vocabulary
-  decider/       the Decider trait, round_robin.rs, prefer_least_errors/
-  observer/      the Observer seam and MetricsObserver; snapshot.rs values, prometheus.rs exposition
-```
-
-### Renamed in the v0.2.1 re-layer
-
-| Old | New |
-|---|---|
-| `settings.rs`, `RpcSettings { label, rpc_url }` | `config.rs`, `UpstreamSettings { label, url }` |
-| yaml `rpcs:` / `rpc_url:` / top-level `rpc_timeout_in_secs` | `upstreams:` / `url:` / `application.proxy.rpc_timeout_in_secs` |
-| `start_up.rs`, `build_upstreams` | `app.rs`, `upstream::build_all` |
-| `route/`, `rpc_proxy` / `get_health` | `http/`, `post_rpc` / `get_healthz` |
-| `ProxyState`, `check_if_batch` | `proxy::Pipeline`, `proxy::jsonrpc::is_batch` |
-| `StatsSnapshot`, `DiffStats` | `observer::snapshot::Snapshot`, `observer::snapshot::Diff` |
-| `MetricsCollector` (in `route/metrics.rs`) | `observer::prometheus::Collector` |
-| `Cached`, `PreferLeastErrorBuildError` and the other three `*BuildError` | `Ranking`, one `BuildError` per module |
-| `UpstreamBuilder`, `ProxyStateBuilder`, `PreferLeastErrors::spawn(..6 args)` | `bon` builders on `Upstream`, `Pipeline`, `PreferLeastErrors`, `Application` |
-
-Old config files still load — see the deprecation note above. `NoopObserver` and `CallError::as_str` were unused and are gone.
-
-## Docs
-
-- [docs/spec.md](docs/spec.md) — product requirements, full feature set
-- [docs/roadmap.md](docs/roadmap.md) — what lands next
-- [docs/erpc-comparison.md](docs/erpc-comparison.md) — feature comparison with eRPC
-- [docs/erpc-gap-priorities.md](docs/erpc-gap-priorities.md) — eRPC gaps ranked by value for effort
-- [docs/design/v0.1.md](docs/design/v0.1.md) — v0.1 design, log schema, known bugs
-- [docs/design/v0.2.1-DECIDER.md](docs/design/v0.2.1-DECIDER.md) — the windowed error-rate decider
-- [docs/design/v0.3-HEDGING.md](docs/design/v0.3-HEDGING.md) — hedged requests
-- [docs/design/v0.4-DEDUP.md](docs/design/v0.4-DEDUP.md) — in-flight dedup
-- [docs/commit-style.md](docs/commit-style.md) — commit convention
+Commit messages follow [docs/commit-style.md](docs/commit-style.md).
