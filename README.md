@@ -1,6 +1,27 @@
 # rpc-plus-plus
 
-rpc-plus-plus is an Ethereum JSON-RPC proxy. Your app sends its RPC calls to one URL, and the proxy spreads them across several upstream providers, such as Alchemy, dRPC, or your own node.
+```
+██████╗  ██████╗   ██████╗
+██╔══██╗ ██╔══██╗ ██╔════╝     ██╗       ██╗
+██████╔╝ ██████╔╝ ██║       ████████╗ ████████╗
+██╔══██╗ ██╔═══╝  ██║       ╚══██╔══╝ ╚══██╔══╝
+██║  ██║ ██║      ╚██████╗     ╚═╝       ╚═╝
+╚═╝  ╚═╝ ╚═╝       ╚═════╝
+  one RPC URL in front of every Ethereum provider you use
+```
+
+[![CI](https://github.com/Jds-23/rpc-plus-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/Jds-23/rpc-plus-plus/actions/workflows/ci.yml)
+
+rpc-plus-plus is an Ethereum JSON-RPC proxy written in Rust. Your app sends its calls to the proxy. The proxy picks an upstream for each call, such as Alchemy, dRPC, or your own node, and moves to the next upstream when one fails.
+
+```mermaid
+flowchart LR
+	app[Your app] -->|POST /rpc| proxy[rpc-plus-plus]
+	proxy -->|attempt 1| a[alchemy]
+	proxy -.->|attempt 2, after a 429 or 5xx| b[drpc]
+	proxy -.->|attempt 3| c[your node]
+	proxy -->|GET /metrics| prom[Prometheus and Grafana]
+```
 
 ## Why a proxy in front of your providers
 
@@ -14,13 +35,58 @@ rpc-plus-plus moves the list of providers and the retry rules out of the app and
 
 With rpc-plus-plus in front of your providers, you can do the following:
 
-- **Survive a provider outage.** If one upstream fails, the proxy retries the call on the next one. The caller sees an error only when every attempt fails, up to `max_attempt` attempts.
+- **Survive a provider outage.** If an upstream times out, can't be reached, or returns HTTP `429` or `5xx`, the proxy retries the call on the next upstream, up to `max_attempt` attempts. A JSON-RPC error that the upstream marks as not retryable, such as a reverted call, goes straight back to the caller.
 - **Route to the fastest provider.** The `LEAST_LATENCY` decider ranks upstreams by their recent response time and sends new calls to the fastest one. `PREFER_LEAST_ERRORS` ranks them by error rate instead. `ROUND_ROBIN` gives each upstream a turn.
 - **Cut tail latency.** With hedging on, the proxy sends a read to a second upstream when the first one is slow to answer. The first answer wins. The proxy never hedges writes.
 - **Send fewer duplicate calls.** With dedup on, concurrent calls that have the same `method` and `params` share one upstream call. Each caller still gets a response with its own `id`.
 - **Debug one call from the logs.** Every log line carries a `request_id`. Follow it to see which upstream the proxy tried, what each one returned, and how long each attempt took. Logs name an upstream by its `label` and never print its URL, so API keys stay out of the logs.
 - **Watch the whole fleet on one dashboard.** `GET /metrics` serves Prometheus metrics, and `docker compose` starts a Grafana dashboard that already shows them.
 - **Serve browser dapps.** CORS settings let pages on the origins that you list call `/rpc`.
+
+## How a call moves through rpc-plus-plus
+
+```
+            your app
+               │  POST /rpc
+               ▼
+ ┌──────────────────────────────────────────────────────────────┐
+ │ http/        CORS check, then hand the body to the Pipeline  │
+ ├──────────────────────────────────────────────────────────────┤
+ │ proxy/       new request_id                                  │
+ │              batch or malformed body ──────────▶ HTTP 400    │
+ ├──────────────────────────────────────────────────────────────┤
+ │ dedup        same read method and params in flight?          │
+ │ (opt-in)       yes ──▶ wait for that call, reply with own id │
+ │                no  ──▶ continue                              │
+ ├──────────────────────────────────────────────────────────────┤
+ │ decider/     order the upstreams, cut to max_attempt         │
+ │              ROUND_ROBIN, PREFER_LEAST_ERRORS, LEAST_LATENCY │
+ ├──────────────────────────────────────────────────────────────┤
+ │ dispatch     hedge off       ──▶ walk the chain, fail over   │
+ │              hedge on, read  ──▶ race the next upstream      │
+ │              hedge on, write ──▶ one upstream, no retry      │
+ └──────────────┬──────────────────┬──────────────────┬─────────┘
+                ▼                  ▼                  ▼
+           ┌─────────┐        ┌─────────┐        ┌───────────┐
+           │ alchemy │        │  drpc   │        │ your node │
+           └─────────┘        └─────────┘        └───────────┘
+
+ observer/    every attempt and request ──▶ GET /metrics
+              every step               ──▶ logs tagged with request_id
+```
+
+## See a failover in the logs
+
+Here is one `eth_blockNumber` call during an Alchemy rate limit, as JSON logs with the `timestamp` and `target` fields removed. All four lines carry the same `request_id`.
+
+```json
+{"level":"INFO","event":"attempt_started","attempt":1,"upstream":"alchemy","hedge":false,"span":{"request_id":"6f0c2a9e-4b1d-4f7a-9c3e-2d8b5a1e7f40","name":"proxy"}}
+{"level":"WARN","event":"attempt_failed","attempt":1,"upstream":"alchemy","duration_ms":41,"http_status":429,"error":"upstream returned error status","span":{"request_id":"6f0c2a9e-4b1d-4f7a-9c3e-2d8b5a1e7f40","name":"proxy"}}
+{"level":"INFO","event":"attempt_started","attempt":2,"upstream":"drpc","hedge":false,"span":{"request_id":"6f0c2a9e-4b1d-4f7a-9c3e-2d8b5a1e7f40","name":"proxy"}}
+{"level":"INFO","event":"attempt_succeeded","attempt":2,"upstream":"drpc","duration_ms":87,"http_status":200,"response_bytes":42,"span":{"request_id":"6f0c2a9e-4b1d-4f7a-9c3e-2d8b5a1e7f40","name":"proxy"}}
+```
+
+The app got a normal response from `drpc`. The logs show why Alchemy didn't answer and how long each attempt took. `rpc_failovers_total{upstream="alchemy"}` goes up by one.
 
 ## Try it
 
@@ -45,7 +111,7 @@ In this section, you start the proxy against two public Ethereum endpoints and s
     cargo run
     ```
 
-    The last startup line is a JSON log line with `"event":"startup_ready"` and `"upstreams":2`.
+    The last startup line has `event="startup_ready"` and `upstreams=2`. In a terminal, the logs are text. When stdout is not a terminal, the logs are JSON lines.
 
 3. In a second terminal, ask for the latest block number:
 

@@ -48,7 +48,7 @@ decider: ROUND_ROBIN
 
 ### `hedge`
 
-When `enabled` is `true`, the proxy sends a read to the next upstream in the chain after the current upstream has gone `after_in_millis` without an answer. The proxy returns the first answer. The proxy never hedges writes.
+When `enabled` is `true`, the proxy sends a read to the next upstream in the chain after the current upstream has gone `after_in_millis` without an answer. The proxy returns the first answer. The proxy never hedges writes. With hedging on, a write goes to the first upstream in the chain only, and the proxy does not retry it on another upstream.
 
 `after_in_millis` must be at least 1. `upstreams[].hedge_after_in_millis` overrides it for one upstream and must also be at least 1. Design: [v0.3-HEDGING.md](design/v0.3-HEDGING.md).
 
