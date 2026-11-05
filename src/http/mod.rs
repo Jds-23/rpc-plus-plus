@@ -8,7 +8,11 @@ use prometheus::Registry;
 use tower_http::cors::CorsLayer;
 
 use crate::{
-    http::{healthz::get_healthz, metrics::get_metrics, rpc::post_rpc},
+    http::{
+        healthz::{get_healthz, get_livez},
+        metrics::get_metrics,
+        rpc::post_rpc,
+    },
     proxy::Pipeline,
 };
 
@@ -30,6 +34,7 @@ pub(crate) fn build_router(
 
     Router::new()
         .route("/healthz", get(get_healthz))
+        .route("/livez", get(get_livez))
         .route("/rpc", rpc)
         .with_state(pipeline)
         .merge(

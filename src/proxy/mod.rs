@@ -123,6 +123,10 @@ impl Pipeline {
 }
 
 impl Pipeline {
+    pub fn is_ready(&self) -> bool {
+        self.core.decider.ready()
+    }
+
     pub async fn proxy(&self, body: Bytes) -> Response {
         let request_id = RequestId::random();
         let span = info_span!("proxy", %request_id);
