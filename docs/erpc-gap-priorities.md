@@ -11,7 +11,7 @@ in the README.
 |---|---|---|---|---|---|
 | 1 | Static API-key auth | S | High | A reachable proxy is an open relay spending upstream keys (README). Spec §3.5 asks for exactly a static key list. | axum middleware in `http/`; key list in `config.rs` via `${VAR}` |
 | 2 | Upstream ejection (circuit breaker) | S | High | Spec §4.2: a dark upstream leaves the pool *immediately* and comes back on recovery. `PREFER_LEAST_ERRORS` only re-ranks it every 15s, it never drops it. | Threshold + cooldown on the ranking in `decider/prefer_least_errors/` |
-| 3 | Readiness in `/healthz` | S | Medium | Today it returns `OK` unconditionally, so a proxy with every upstream down still looks healthy to Docker / a load balancer. | `http/healthz.rs`: report not-ready when `decide(1)` is empty |
+| 3 | Readiness in `/healthz` | S | Medium | Today it returns `OK` unconditionally, so a proxy with every upstream down still looks healthy to Docker / a load balancer. | `http/healthz.rs`: report not-ready when `Decider::ready()` is false. Not `decide(1)`: it mutates routing state and fails open |
 | 4 | Grafana dashboard | S | Medium | Spec §3.2 deliverable; the metrics already exist (attempts, duration, hedges, hedge wins). | Provisioned JSON in `docker-compose.yml` |
 | 5 | CORS | S | Medium | Browser dapps can't call the proxy at all without it. | `tower_http::cors::CorsLayer` in `http/mod.rs`, origins in config |
 | 6 | Hedge `eth_sendRawTransaction` | S | Medium | Faster mempool propagation. Safe because a signed raw tx is idempotent by hash and nonce. | Let it through `is_write` in the hedger only; map a slower leg's "already known" to success |

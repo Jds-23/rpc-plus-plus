@@ -1,6 +1,6 @@
 # Metrics and dashboard reference
 
-`GET /metrics` serves Prometheus metrics. `GET /healthz` returns `OK`.
+`GET /metrics` serves Prometheus metrics. `GET /healthz` is the readiness probe: it returns `OK`, or 503 `NOT READY` when the decider reports that no upstream is usable. `GET /livez` always returns `OK`.
 
 ## Metrics
 

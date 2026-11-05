@@ -13,6 +13,12 @@ pub trait Decider: Send + Sync + 'static {
     fn decide(&self, max: usize) -> Vec<Arc<Upstream>>;
 
     fn upstream_len(&self) -> usize;
+
+    /// `false` when no upstream is usable. `/healthz` answers 503 then.
+    /// Must not change routing state, unlike `decide`.
+    fn ready(&self) -> bool {
+        true
+    }
 }
 
 /// The order `decide` hands out, best first.
