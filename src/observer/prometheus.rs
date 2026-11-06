@@ -421,6 +421,7 @@ fn counter_metric(upstream: &str, outcome: &str, value: u64) -> Metric {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
+    use axum::body::Bytes;
     use prometheus::{TextEncoder, core::Collector as PrometheusCollector, proto::MetricFamily};
     use reqwest::StatusCode;
 
@@ -526,6 +527,7 @@ rpc_attempt_duration_seconds_count{upstream="alpha"} 1
             http_status: StatusCode::OK,
             code: -32005,
             retryable: true,
+            body: Bytes::new(),
         };
         observer.record(
             &alpha,

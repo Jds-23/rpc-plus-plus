@@ -373,7 +373,12 @@ fn finish(finished: Finished<'_>, received_at: Instant) -> Reply {
                 duration_ms = elapsed_ms(received_at),
                 error = %error,
             );
-            Reply::rpc_error(JSONRPC_INTERNAL_ERROR, &error)
+            match failure {
+                Failure::Call(CallError::RpcError {
+                    http_status, body, ..
+                }) => Reply { http_status, body },
+                _ => Reply::rpc_error(JSONRPC_INTERNAL_ERROR, &error),
+            }
         }
     }
 }

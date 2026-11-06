@@ -170,6 +170,76 @@ async fn a_json_rpc_error_moves_to_the_next_upstream() {
     assert_eq!(live.received_requests().await.unwrap().len(), 1);
 }
 
+#[tokio::test]
+async fn a_non_retryable_rpc_error_returns_the_upstream_body() {
+    const INVALID: &str =
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params"}}"#;
+    let invalid = mock_rpc_server::raw(INVALID).await;
+    let live = mock_rpc_server::ok("0xb").await;
+    let mut settings = test_settings(vec![rpc("one", invalid.uri()), rpc("two", live.uri())]);
+    settings.application.proxy.retry_after_in_secs = 0;
+    let addr = spawn_app(settings).await;
+
+    let res = reqwest::Client::new()
+        .post(format!("{addr}/rpc"))
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":[]}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.bytes().await.unwrap(), INVALID.as_bytes());
+    assert_eq!(invalid.received_requests().await.unwrap().len(), 1);
+    assert_eq!(live.received_requests().await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn a_revert_keeps_its_data() {
+    const REVERTED: &str = r#"{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted: nope","data":"0x08c379a0"}}"#;
+    let reverting = mock_rpc_server::raw(REVERTED).await;
+    let live = mock_rpc_server::ok("0xb").await;
+    let mut settings = test_settings(vec![rpc("one", reverting.uri()), rpc("two", live.uri())]);
+    settings.application.proxy.retry_after_in_secs = 0;
+    let addr = spawn_app(settings).await;
+
+    let res = reqwest::Client::new()
+        .post(format!("{addr}/rpc"))
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[]}))
+        .send()
+        .await
+        .unwrap();
+
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["code"], 3);
+    assert_eq!(body["error"]["message"], "execution reverted: nope");
+    assert_eq!(body["error"]["data"], "0x08c379a0");
+    assert_eq!(live.received_requests().await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn an_exhausted_rpc_error_chain_returns_the_last_upstream_error() {
+    let a = mock_rpc_server::rpc_erroring(-32005, "a limit exceeded").await;
+    let b = mock_rpc_server::rpc_erroring(-32005, "b limit exceeded").await;
+    let mut settings = test_settings(vec![rpc("one", a.uri()), rpc("two", b.uri())]);
+    settings.application.proxy.max_attempt = 2;
+    settings.application.proxy.retry_after_in_secs = 0;
+    let addr = spawn_app(settings).await;
+
+    let res = reqwest::Client::new()
+        .post(format!("{addr}/rpc"))
+        .json(&json!({"jsonrpc":"2.0","id":7,"method":"eth_blockNumber","params":[]}))
+        .send()
+        .await
+        .unwrap();
+
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["code"], -32005);
+    assert_eq!(body["error"]["message"], "b limit exceeded");
+    assert_eq!(body["id"], 7);
+    assert_eq!(a.received_requests().await.unwrap().len(), 1);
+    assert_eq!(b.received_requests().await.unwrap().len(), 1);
+}
+
 const SEND_RAW: &str = "eth_sendRawTransaction";
 
 #[tokio::test]

@@ -123,6 +123,7 @@ mod tests {
         time::Duration,
     };
 
+    use axum::body::Bytes;
     use reqwest::{Client, StatusCode};
     use tokio::time::Instant;
 
@@ -157,6 +158,7 @@ mod tests {
                     http_status: StatusCode::OK,
                     code: 3,
                     retryable: false,
+                    body: Bytes::new(),
                 }),
             }
         }

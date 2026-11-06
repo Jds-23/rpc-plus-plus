@@ -167,6 +167,7 @@ impl Upstream {
                 http_status,
                 code: fault.code,
                 retryable: fault.retryable,
+                body,
             });
         }
 

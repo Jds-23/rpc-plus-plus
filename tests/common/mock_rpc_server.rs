@@ -87,6 +87,16 @@ pub async fn rpc_erroring(code: i64, message: &'static str) -> MockServer {
     mock_rpc(move |_| RpcReply::error(code, message)).await
 }
 
+pub async fn raw(body: &'static str) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(&server)
+        .await;
+    server
+}
+
 struct Delayed<R> {
     inner: R,
     delay: std::time::Duration,
