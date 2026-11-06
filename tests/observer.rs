@@ -145,6 +145,24 @@ async fn a_json_rpc_error_on_a_200_is_not_a_success() {
 }
 
 #[tokio::test]
+async fn a_caller_fault_is_counted_apart_from_upstream_errors() {
+    let strict = mock_rpc_server::rpc_erroring(-32602, "invalid params").await;
+    let (ids, observer) = observer(&["strict"]);
+    let addr = spawn_app_with_observer(
+        settings(vec![rpc("strict", strict.uri())]),
+        observer.clone(),
+    )
+    .await;
+
+    post(&addr).await;
+
+    let stats = observer.snapshot(&ids[0]).unwrap();
+    assert_eq!(stats.rpc_caller_fault, 1);
+    assert_eq!(stats.rpc_error, 0);
+    assert_eq!(stats.success, 0);
+}
+
+#[tokio::test]
 async fn a_hedge_and_its_win_land_on_the_overtaken_pair() {
     let slow = mock_rpc_server::slow("0xa", std::time::Duration::from_millis(500)).await;
     let fast = mock_rpc_server::ok("0xb").await;

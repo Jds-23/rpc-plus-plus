@@ -56,6 +56,7 @@ impl CallError {
     pub const READ_FAILED: &'static str = "read_failed";
     pub const ERROR_STATUS: &'static str = "error_status";
     pub const RPC_ERROR: &'static str = "rpc_error";
+    pub const RPC_CALLER_FAULT: &'static str = "rpc_caller_fault";
 
     /// `None` for `Unreachable`: no response arrived to carry a status.
     pub fn http_status(&self) -> Option<StatusCode> {

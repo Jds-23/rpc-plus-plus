@@ -17,6 +17,7 @@ use crate::{
 
 pub(crate) const DEFAULT_RPC_TIMEOUT_IN_SECS: u64 = 3;
 const DEFAULT_HEDGE_AFTER_IN_MILLIS: u64 = 250;
+const DEFAULT_MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
 
 const POOL_MAX_IDLE_PER_HOST: usize = 32;
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -52,6 +53,7 @@ pub struct Upstream {
     id: UpstreamId,
     timeout: Duration,
     hedge_after: Duration,
+    max_response_bytes: u64,
 }
 
 impl fmt::Debug for Upstream {
@@ -70,6 +72,8 @@ pub enum BuildError {
     ZeroTimeout,
     #[error("hedge_after_in_millis must be at least 1")]
     ZeroHedgeAfter,
+    #[error("max_response_bytes must be at least 1")]
+    ZeroMaxResponseBytes,
     #[error("failed to build HTTP client: {0}")]
     HttpClient(#[from] reqwest::Error),
 }
@@ -91,6 +95,7 @@ impl Upstream {
         #[builder(into)] http: reqwest::Client,
         #[builder(default = DEFAULT_RPC_TIMEOUT_IN_SECS)] rpc_timeout_in_secs: u64,
         #[builder(default = DEFAULT_HEDGE_AFTER_IN_MILLIS)] hedge_after_in_millis: u64,
+        #[builder(default = DEFAULT_MAX_RESPONSE_BYTES)] max_response_bytes: u64,
     ) -> Result<Self, BuildError> {
         if label.trim().is_empty() {
             return Err(BuildError::EmptyLabel);
@@ -104,6 +109,9 @@ impl Upstream {
         if hedge_after_in_millis == 0 {
             return Err(BuildError::ZeroHedgeAfter);
         }
+        if max_response_bytes == 0 {
+            return Err(BuildError::ZeroMaxResponseBytes);
+        }
 
         Ok(Upstream {
             http,
@@ -111,6 +119,7 @@ impl Upstream {
             id: UpstreamId::new(label),
             timeout: Duration::from_secs(rpc_timeout_in_secs),
             hedge_after: Duration::from_millis(hedge_after_in_millis),
+            max_response_bytes,
         })
     }
 }
@@ -146,17 +155,32 @@ impl Upstream {
     }
 
     async fn call_inner(&self, body: &Bytes) -> Result<CallOutcome, CallError> {
-        let res = self.send(body).await.map_err(|err| {
+        let mut res = self.send(body).await.map_err(|err| {
             let error = error_chain(err);
             CallError::Unreachable { error }
         })?;
 
         let http_status = res.status();
 
-        let body = res.bytes().await.map_err(|err| {
+        let max = self.max_response_bytes;
+        let too_large = || CallError::ReadFailed {
+            http_status,
+            error: format!("response exceeds max_response_bytes ({max})"),
+        };
+        if res.content_length().is_some_and(|len| len > max) {
+            return Err(too_large());
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = res.chunk().await.map_err(|err| {
             let error = error_chain(err);
             CallError::ReadFailed { http_status, error }
-        })?;
+        })? {
+            if (body.len() + chunk.len()) as u64 > max {
+                return Err(too_large());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let body = Bytes::from(body);
 
         if http_status != StatusCode::OK {
             return Err(CallError::ErrorStatus { http_status });
@@ -194,6 +218,7 @@ where
                 .label(item.label.clone())
                 .url(item.url)
                 .rpc_timeout_in_secs(proxy.rpc_timeout_in_secs)
+                .max_response_bytes(proxy.max_response_bytes)
                 .hedge_after_in_millis(
                     item.hedge_after_in_millis
                         .unwrap_or(proxy.hedge.after_in_millis),
@@ -234,6 +259,7 @@ mod tests {
             max_attempt: 3,
             retry_after_in_secs: 1,
             rpc_timeout_in_secs: 3,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             hedge: HedgeSettings {
                 enabled: true,
                 after_in_millis,
@@ -269,6 +295,60 @@ mod tests {
         let error = builder_upstream(Some(0)).expect_err("zero should be rejected");
 
         assert!(matches!(error, BuildError::ZeroHedgeAfter), "{error}");
+    }
+
+    async fn call_capped(body: &'static str, max_response_bytes: u64) -> CallResult {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let upstream = Upstream::builder()
+            .label("one")
+            .url(server.uri())
+            .http(Client::new())
+            .max_response_bytes(max_response_bytes)
+            .build()
+            .unwrap();
+
+        upstream.call(&Bytes::from_static(b"{}")).await
+    }
+
+    #[tokio::test]
+    async fn an_oversized_response_is_refused() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#;
+
+        let result = call_capped(body, body.len() as u64 - 1).await;
+
+        assert!(
+            matches!(result.result, Err(CallError::ReadFailed { .. })),
+            "{:?}",
+            result.result.map(|outcome| outcome.http_status)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_response_at_the_cap_is_read() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#;
+
+        let result = call_capped(body, body.len() as u64).await;
+
+        assert_eq!(result.result.unwrap().response_body, body);
+    }
+
+    #[test]
+    fn a_zero_response_cap_fails_the_build() {
+        let error = Upstream::builder()
+            .label("one")
+            .url("http://one.invalid")
+            .http(Client::new())
+            .max_response_bytes(0)
+            .build()
+            .unwrap_err();
+
+        assert!(matches!(error, BuildError::ZeroMaxResponseBytes), "{error}");
     }
 
     #[test]

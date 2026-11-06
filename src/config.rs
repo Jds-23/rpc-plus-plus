@@ -26,6 +26,7 @@ pub struct ProxySettings {
     pub max_attempt: u64,
     pub retry_after_in_secs: u64,
     pub rpc_timeout_in_secs: u64,
+    pub max_response_bytes: u64,
     pub hedge: HedgeSettings,
     pub dedup: DedupSettings,
 }
@@ -130,6 +131,7 @@ where
         .set_default("application.proxy.max_attempt", 3)?
         .set_default("application.proxy.retry_after_in_secs", 1)?
         .set_default("application.proxy.rpc_timeout_in_secs", 3)?
+        .set_default("application.proxy.max_response_bytes", 10 * 1024 * 1024)?
         .set_default("application.proxy.hedge.enabled", false)?
         .set_default("application.proxy.hedge.after_in_millis", 250)?
         .set_default("application.proxy.dedup.enabled", false)?
@@ -395,6 +397,10 @@ application:
         assert_eq!(settings.application.host, "127.0.0.1");
         assert_eq!(settings.application.proxy.max_attempt, 3);
         assert_eq!(settings.application.proxy.rpc_timeout_in_secs, 3);
+        assert_eq!(
+            settings.application.proxy.max_response_bytes,
+            10 * 1024 * 1024
+        );
         assert_eq!(settings.application.proxy.retry_after_in_secs, 1);
         assert_eq!(settings.decider, DeciderKind::RoundRobin);
         assert!(!settings.application.proxy.hedge.enabled);

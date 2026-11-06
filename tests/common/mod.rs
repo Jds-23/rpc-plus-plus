@@ -31,6 +31,7 @@ pub fn test_settings(upstreams: Vec<UpstreamSettings>) -> Settings {
                 max_attempt: 3,
                 retry_after_in_secs: 1,
                 rpc_timeout_in_secs: 1,
+                max_response_bytes: 10 * 1024 * 1024,
                 hedge: HedgeSettings {
                     enabled: false,
                     after_in_millis: 250,
