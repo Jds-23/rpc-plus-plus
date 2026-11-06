@@ -155,6 +155,7 @@ mod tests {
     };
 
     use arc_swap::ArcSwap;
+    use axum::body::Bytes;
     use reqwest::StatusCode;
 
     use super::*;
@@ -312,6 +313,7 @@ mod tests {
             http_status: StatusCode::OK,
             code: 3,
             retryable: false,
+            body: Bytes::new(),
         };
         record_ok(&observer, "head", 40, ms(100));
         record_err(&observer, "rival", 20, ms(20), &bad_request);

@@ -100,6 +100,7 @@ pub(super) async fn try_once(
                     http_status,
                     code,
                     retryable,
+                    ..
                 } => warn!(
                     event = "attempt_failed",
                     attempt,

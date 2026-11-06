@@ -45,6 +45,7 @@ pub enum CallError {
         http_status: StatusCode,
         code: i64,
         retryable: bool,
+        body: Bytes,
     },
     #[error("upstream returned error status {}", http_status.as_u16())]
     ErrorStatus { http_status: StatusCode },
