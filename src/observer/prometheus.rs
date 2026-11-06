@@ -265,13 +265,14 @@ fn family(name: &str, help: &str, kind: MetricType, metrics: Vec<Metric>) -> Met
     family
 }
 
-fn outcomes(snapshot: &Snapshot) -> [(&'static str, u64); 6] {
+fn outcomes(snapshot: &Snapshot) -> [(&'static str, u64); 7] {
     [
         (SUCCESS, snapshot.success),
         (CallError::UNREACHABLE, snapshot.unreachable),
         (CallError::READ_FAILED, snapshot.read_failed),
         (CallError::ERROR_STATUS, snapshot.error_status),
         (CallError::RPC_ERROR, snapshot.rpc_error),
+        (CallError::RPC_CALLER_FAULT, snapshot.rpc_caller_fault),
         (ABANDONED, snapshot.abandoned),
     ]
 }
@@ -447,12 +448,14 @@ rpc_attempts_total{outcome="unreachable",upstream="alpha"} 2
 rpc_attempts_total{outcome="read_failed",upstream="alpha"} 1
 rpc_attempts_total{outcome="error_status",upstream="alpha"} 0
 rpc_attempts_total{outcome="rpc_error",upstream="alpha"} 1
+rpc_attempts_total{outcome="rpc_caller_fault",upstream="alpha"} 0
 rpc_attempts_total{outcome="abandoned",upstream="alpha"} 1
 rpc_attempts_total{outcome="success",upstream="zulu"} 0
 rpc_attempts_total{outcome="unreachable",upstream="zulu"} 0
 rpc_attempts_total{outcome="read_failed",upstream="zulu"} 0
 rpc_attempts_total{outcome="error_status",upstream="zulu"} 0
 rpc_attempts_total{outcome="rpc_error",upstream="zulu"} 0
+rpc_attempts_total{outcome="rpc_caller_fault",upstream="zulu"} 0
 rpc_attempts_total{outcome="abandoned",upstream="zulu"} 0
 "#;
 

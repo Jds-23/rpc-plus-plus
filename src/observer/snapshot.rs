@@ -35,6 +35,7 @@ pub struct UpstreamStats {
     pub read_failed: AtomicU64,
     pub error_status: AtomicU64,
     pub rpc_error: AtomicU64,
+    pub rpc_caller_fault: AtomicU64,
     pub abandoned: AtomicU64,
 
     pub retryable_failures: AtomicU64,
@@ -52,6 +53,7 @@ impl UpstreamStats {
             read_failed: self.read_failed.load(Ordering::Relaxed),
             error_status: self.error_status.load(Ordering::Relaxed),
             rpc_error: self.rpc_error.load(Ordering::Relaxed),
+            rpc_caller_fault: self.rpc_caller_fault.load(Ordering::Relaxed),
             abandoned: self.abandoned.load(Ordering::Relaxed),
             retryable_failures: self.retryable_failures.load(Ordering::Relaxed),
             buckets: self
@@ -73,6 +75,7 @@ pub struct Snapshot {
     pub read_failed: u64,
     pub error_status: u64,
     pub rpc_error: u64,
+    pub rpc_caller_fault: u64,
     pub abandoned: u64,
     pub retryable_failures: u64,
 
@@ -152,6 +155,7 @@ pub struct Diff {
     read_failed: u64,
     error_status: u64,
     rpc_error: u64,
+    rpc_caller_fault: u64,
     abandoned: u64,
     retryable_failures: u64,
     duration_micros: u64,
@@ -163,7 +167,7 @@ impl Diff {
         self.error_status + self.read_failed + self.unreachable + self.rpc_error
     }
     pub fn success(&self) -> u64 {
-        self.success
+        self.success + self.rpc_caller_fault
     }
     pub fn answered(&self) -> u64 {
         self.error() + self.success()
@@ -205,6 +209,7 @@ impl Snapshot {
             read_failed: d(|diff| diff.read_failed),
             error_status: d(|diff| diff.error_status),
             rpc_error: d(|diff| diff.rpc_error),
+            rpc_caller_fault: d(|diff| diff.rpc_caller_fault),
             abandoned: d(|diff| diff.abandoned),
             retryable_failures: d(|diff| diff.retryable_failures),
             duration_micros: d(|diff| diff.duration_micros_total),

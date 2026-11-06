@@ -224,6 +224,9 @@ impl Observer for MetricsObserver {
             Err(CallError::ErrorStatus { .. }) => &stat.error_status,
             Err(CallError::ReadFailed { .. }) => &stat.read_failed,
             Err(CallError::Unreachable { .. }) => &stat.unreachable,
+            Err(CallError::RpcError {
+                retryable: false, ..
+            }) => &stat.rpc_caller_fault,
             Err(CallError::RpcError { .. }) => &stat.rpc_error,
         };
 

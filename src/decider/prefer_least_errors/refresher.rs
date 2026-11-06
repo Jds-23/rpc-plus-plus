@@ -146,6 +146,7 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use arc_swap::ArcSwap;
+    use axum::body::Bytes;
     use reqwest::StatusCode;
 
     use super::*;
@@ -223,6 +224,25 @@ mod tests {
         }
     }
 
+    fn record_caller_faults(observer: &MetricsObserver, label: &str, n: u64) {
+        let id = UpstreamId::new(label);
+        let fault = CallError::RpcError {
+            http_status: StatusCode::OK,
+            code: -32602,
+            retryable: false,
+            body: Bytes::new(),
+        };
+        for _ in 0..n {
+            observer.record(
+                &id,
+                CallRecord {
+                    outcome: Err(&fault),
+                    duration: Duration::from_millis(1),
+                },
+            );
+        }
+    }
+
     fn record_abandoned(observer: &MetricsObserver, label: &str, n: u64) {
         let id = UpstreamId::new(label);
         for _ in 0..n {
@@ -247,6 +267,17 @@ mod tests {
         refresher.refresh();
 
         assert_eq!(order(&decider), ["b", "a"]);
+    }
+
+    #[test]
+    fn a_caller_fault_upstream_keeps_the_head_over_one_returning_500s() {
+        let (mut refresher, decider, observer) = harness(&["failing", "blamed"]);
+        record(&observer, "failing", 20, 20);
+        record_caller_faults(&observer, "blamed", 40);
+
+        refresher.refresh();
+
+        assert_eq!(order(&decider), ["blamed", "failing"]);
     }
 
     #[test]
