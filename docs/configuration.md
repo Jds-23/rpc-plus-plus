@@ -14,6 +14,7 @@ application:
     max_attempt: 3
     retry_after_in_secs: 1
     rpc_timeout_in_secs: 3
+    max_response_bytes: 10485760
     hedge:
       enabled: false
       after_in_millis: 250
@@ -45,6 +46,8 @@ decider: ROUND_ROBIN
 `retry_after_in_secs` is the wait before a retry.
 
 `rpc_timeout_in_secs` is how long the proxy waits for one upstream call. The `LEAST_LATENCY` decider also scores a failed call as this long.
+
+`max_response_bytes` is the largest upstream response the proxy reads. The default is 10 MiB. A larger response fails the call as `read_failed`, and the proxy tries the next upstream. The value must be at least 1.
 
 ### `hedge`
 
